@@ -1,0 +1,57 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Category {
+  id           String        @id @default(cuid())
+  name         String        @unique
+  color        String        @default("#6366f1")
+  icon         String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  transactions Transaction[]
+  rules        Rule[]
+}
+
+model Transaction {
+  id          String    @id @default(cuid())
+  date        DateTime
+  description String
+  amount      Int
+  categoryId  String?
+  category    Category? @relation(fields: [categoryId], references: [id])
+  source      Source    @default(MANUAL)
+  memo        String?
+  confirmed   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([date])
+  @@index([categoryId])
+}
+
+model Rule {
+  id         String   @id @default(cuid())
+  keyword    String
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+  priority   Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([keyword])
+}
+
+enum Source {
+  CSV
+  MANUAL
+  IMAGE
+}
