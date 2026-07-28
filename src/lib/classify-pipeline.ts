@@ -22,6 +22,23 @@ export async function classifyParsedTransactions(
   const rules = await prisma.rule.findMany({ include: { category: true } });
 
   const categorized: ClassifiedTransaction[] = transactions.map((tx) => {
+    // Vision OCR 等で既にカテゴリが付いている場合は優先
+    let presetId =
+      tx.categoryId && categoryIdSet.has(tx.categoryId) ? tx.categoryId : null;
+    if (!presetId && tx.categoryName) {
+      const byName = categories.find((c) => c.name === tx.categoryName);
+      if (byName) presetId = byName.id;
+    }
+    if (presetId) {
+      const cat = categoryById.get(presetId);
+      return {
+        ...tx,
+        categoryId: presetId,
+        categoryName: cat?.name ?? tx.categoryName ?? null,
+        categoryColor: cat?.color ?? tx.categoryColor ?? null,
+      };
+    }
+
     const matched = rules
       .filter((r) =>
         tx.description.toLowerCase().includes(r.keyword.toLowerCase())

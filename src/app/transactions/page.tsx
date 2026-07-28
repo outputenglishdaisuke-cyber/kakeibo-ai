@@ -3,14 +3,12 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { CategorySelect } from "@/components/ui/category-select";
 import { formatCurrency, formatDate, getMonthKey } from "@/lib/utils";
 import type { Transaction, Category } from "@/types";
 import {
-  Pencil,
   Trash2,
   Check,
-  X,
   ChevronLeft,
   ChevronRight,
   AlertTriangle,
@@ -111,8 +109,13 @@ export default function TransactionsPage() {
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editCategoryId, setEditCategoryId] = useState<string>("");
+  const [savingCategoryIds, setSavingCategoryIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(
+    null
+  );
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -122,8 +125,8 @@ export default function TransactionsPage() {
   const hasActiveFilters =
     selectedCategoryKeys.length > 0 || selectedSources.length > 0;
 
-  const fetchAll = useCallback(async () => {
-    setLoading(true);
+  const fetchAll = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
     try {
       const params = new URLSearchParams();
       params.set("month", currentMonth);
@@ -140,9 +143,9 @@ export default function TransactionsPage() {
       ]);
       if (txRes.ok) setTransactions(await txRes.json());
       if (catRes.ok) setCategories(await catRes.json());
-      setSelectedIds(new Set());
+      if (!opts?.silent) setSelectedIds(new Set());
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setLoading(false);
     }
   }, [currentMonth, selectedCategoryKeys, selectedSources]);
 
@@ -176,19 +179,58 @@ export default function TransactionsPage() {
     setSelectedIds(new Set());
   };
 
-  const startEdit = (tx: Transaction) => {
-    setEditingId(tx.id);
-    setEditCategoryId(tx.categoryId ?? "");
-  };
+  const showToast = useCallback((type: "success" | "error", text: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ type, text });
+    toastTimer.current = setTimeout(() => setToast(null), 2000);
+  }, []);
 
-  const saveEdit = async (id: string) => {
-    await fetch(`/api/transactions/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ categoryId: editCategoryId || null }),
-    });
-    setEditingId(null);
-    fetchAll();
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
+  }, []);
+
+  const changeCategory = async (tx: Transaction, categoryId: string) => {
+    const nextId = categoryId || null;
+    const prevId = tx.categoryId ?? null;
+    if (nextId === prevId) return;
+
+    const cat = nextId ? categories.find((c) => c.id === nextId) ?? null : null;
+
+    setTransactions((prev) =>
+      prev.map((t) =>
+        t.id === tx.id
+          ? {
+              ...t,
+              categoryId: nextId,
+              category: cat,
+            }
+          : t
+      )
+    );
+    setSavingCategoryIds((prev) => new Set(prev).add(tx.id));
+
+    try {
+      const res = await fetch(`/api/transactions/${tx.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ categoryId: nextId }),
+      });
+      if (!res.ok) throw new Error("update failed");
+      showToast("success", "更新しました");
+      // フィルター条件外になった明細は一覧から外す
+      await fetchAll({ silent: true });
+    } catch {
+      showToast("error", "カテゴリの更新に失敗しました");
+      await fetchAll({ silent: true });
+    } finally {
+      setSavingCategoryIds((prev) => {
+        const next = new Set(prev);
+        next.delete(tx.id);
+        return next;
+      });
+    }
   };
 
   const deleteTransaction = async (id: string) => {
@@ -299,25 +341,6 @@ export default function TransactionsPage() {
 
   const total = transactions.reduce((s, tx) => s + tx.amount, 0);
 
-  const renderCategorySelect = (compact = false) => (
-    <select
-      className={
-        compact
-          ? "rounded border border-gray-300 px-2 py-1 text-sm"
-          : "h-11 w-full rounded-lg border border-gray-300 px-3 text-base"
-      }
-      value={editCategoryId}
-      onChange={(e) => setEditCategoryId(e.target.value)}
-    >
-      <option value="">未分類</option>
-      {categories.map((c) => (
-        <option key={c.id} value={c.id}>
-          {c.name}
-        </option>
-      ))}
-    </select>
-  );
-
   const confirmTitle =
     confirmDialog?.type === "selected"
       ? `選択した${confirmDialog.count}件を削除`
@@ -371,6 +394,22 @@ export default function TransactionsPage() {
           }`}
         >
           {message.text}
+        </div>
+      )}
+
+      {toast && (
+        <div
+          role="status"
+          className={`fixed bottom-20 right-4 z-50 rounded-lg px-4 py-3 text-sm shadow-lg sm:bottom-6 ${
+            toast.type === "success"
+              ? "bg-gray-900 text-white"
+              : "bg-red-600 text-white"
+          }`}
+        >
+          <span className="inline-flex items-center gap-2">
+            {toast.type === "success" && <Check className="h-4 w-4" />}
+            {toast.text}
+          </span>
         </div>
       )}
 
@@ -605,15 +644,14 @@ export default function TransactionsPage() {
                           {formatCurrency(tx.amount)}
                         </td>
                         <td className="py-3 pr-4">
-                          {editingId === tx.id ? (
-                            renderCategorySelect(true)
-                          ) : tx.category ? (
-                            <Badge color={tx.category.color}>
-                              {tx.category.name}
-                            </Badge>
-                          ) : (
-                            <span className="text-xs text-gray-400">未分類</span>
-                          )}
+                          <CategorySelect
+                            compact
+                            categories={categories}
+                            value={tx.categoryId}
+                            disabled={savingCategoryIds.has(tx.id)}
+                            onChange={(id) => changeCategory(tx, id)}
+                            aria-label={`${tx.description} のカテゴリ`}
+                          />
                         </td>
                         <td className="py-3 pr-4">
                           <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
@@ -621,43 +659,14 @@ export default function TransactionsPage() {
                           </span>
                         </td>
                         <td className="py-3">
-                          <div className="flex items-center gap-1">
-                            {editingId === tx.id ? (
-                              <>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => saveEdit(tx.id)}
-                                >
-                                  <Check className="h-4 w-4 text-green-600" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => setEditingId(null)}
-                                >
-                                  <X className="h-4 w-4 text-gray-400" />
-                                </Button>
-                              </>
-                            ) : (
-                              <>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => startEdit(tx)}
-                                >
-                                  <Pencil className="h-4 w-4" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => deleteTransaction(tx.id)}
-                                >
-                                  <Trash2 className="h-4 w-4 text-red-400" />
-                                </Button>
-                              </>
-                            )}
-                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => deleteTransaction(tx.id)}
+                            aria-label="削除"
+                          >
+                            <Trash2 className="h-4 w-4 text-red-400" />
+                          </Button>
                         </td>
                       </tr>
                     ))}
@@ -703,56 +712,28 @@ export default function TransactionsPage() {
                           <span className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-600">
                             {sourceLabel(tx.source)}
                           </span>
-                          {editingId !== tx.id &&
-                            (tx.category ? (
-                              <Badge color={tx.category.color}>
-                                {tx.category.name}
-                              </Badge>
-                            ) : (
-                              <span className="text-xs text-gray-400">未分類</span>
-                            ))}
                         </div>
 
-                        {editingId === tx.id ? (
-                          <div className="mt-3 space-y-3">
-                            {renderCategorySelect(false)}
-                            <div className="flex gap-2">
-                              <Button
-                                className="flex-1"
-                                onClick={() => saveEdit(tx.id)}
-                              >
-                                <Check className="h-4 w-4" />
-                                保存
-                              </Button>
-                              <Button
-                                variant="outline"
-                                className="flex-1"
-                                onClick={() => setEditingId(null)}
-                              >
-                                キャンセル
-                              </Button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="mt-3 flex gap-2">
-                            <Button
-                              variant="outline"
-                              className="flex-1"
-                              onClick={() => startEdit(tx)}
-                            >
-                              <Pencil className="h-4 w-4" />
-                              カテゴリ変更
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => deleteTransaction(tx.id)}
-                              aria-label="削除"
-                            >
-                              <Trash2 className="h-4 w-4 text-red-400" />
-                            </Button>
-                          </div>
-                        )}
+                        <div className="mt-3">
+                          <CategorySelect
+                            categories={categories}
+                            value={tx.categoryId}
+                            disabled={savingCategoryIds.has(tx.id)}
+                            onChange={(id) => changeCategory(tx, id)}
+                            aria-label={`${tx.description} のカテゴリ`}
+                          />
+                        </div>
+
+                        <div className="mt-3 flex gap-2">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => deleteTransaction(tx.id)}
+                            aria-label="削除"
+                          >
+                            <Trash2 className="h-4 w-4 text-red-400" />
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   </div>

@@ -76,6 +76,23 @@ export interface ParsedTransaction {
   categoryId?: string | null;
   categoryName?: string | null;
   categoryColor?: string | null;
+  /** 同一レシート画像から分割された品目をまとめるためのグループID */
+  receiptGroupId?: string | null;
+  /** レシートの店名（品目分割時） */
+  storeName?: string | null;
+  /** レシート上の品目名（品目分割時） */
+  itemName?: string | null;
+}
+
+/** Vision OCR が返す抽出結果（分類前） */
+export interface ExtractedImageTransaction {
+  date: string;
+  description: string;
+  amount: number;
+  storeName?: string | null;
+  itemName?: string | null;
+  /** AI が提案したカテゴリ名（候補に無い/未分類なら null） */
+  categoryName?: string | null;
 }
 
 // AI レスポンス

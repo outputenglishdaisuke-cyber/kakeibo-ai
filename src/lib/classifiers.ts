@@ -3,6 +3,7 @@ import type {
   Category,
   ClassificationResult,
   CsvStructureAnalysis,
+  ExtractedImageTransaction,
 } from "@/types";
 
 /**
@@ -254,15 +255,32 @@ suggestedCategoryId には上記の id を正確にコピーしてください�
 }
 
 /**
- * 利用明細画像から取引情報をOCRで抽出する（Claude Vision）。
+ * 利用明細画像・レシート画像から取引情報をOCRで抽出する（Claude Vision）。
+ * レシートで品目内訳が読める場合は品目ごとに分割し、カテゴリ名も提案する。
+ * 読めない場合は店名ベースの1件にフォールバックする。
  */
 export async function extractTransactionsFromImage(
   base64Image: string,
-  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
-): Promise<{ date: string; description: string; amount: number }[]> {
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+  categories: Category[] = []
+): Promise<ExtractedImageTransaction[]> {
+  const categoryNames = categories.map((c) => c.name);
+  const categoryListText =
+    categoryNames.length > 0
+      ? categoryNames.map((n) => `- ${n}`).join("\n")
+      : `- 家賃
+- 電気
+- ガス
+- 水道
+- 食費
+- 日用品
+- 外食費
+- 趣味・嗜好・娯楽
+- 特別費`;
+
   const message = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 2048,
+    max_tokens: 8192,
     messages: [
       {
         role: "user",
@@ -277,20 +295,49 @@ export async function extractTransactionsFromImage(
           },
           {
             type: "text",
-            text: `この画像はクレジットカードや銀行の利用明細です。
-画像から取引情報を読み取り、以下の JSON 配列形式で返してください。
-日付は YYYY-MM-DD 形式、金額は円単位の整数で返してください。
+            text: `これは家計簿アプリのレシート・利用明細解析機能です。
+画像を読み取り、支出明細を可能な限り正確に抽出してください。
 
+【あなたの役割】
+- レシートに記載された個々の購入品目を可能な限り読み取り、それぞれの金額を抽出すること
+- 各品目について、次のカテゴリのいずれに該当するかを判定すること
+- 判定が難しい場合は、無理に分類せず categoryName を null（未分類）としてよいこと
+- レシートの品目内訳が読み取れない場合（感熱紙の劣化、手書き、合計金額のみの記載など）は、店名全体から推測した1件の明細として処理してよいこと
+
+【カテゴリ一覧（categoryName はこの名前からのみ選ぶ。該当なしは null）】
+${categoryListText}
+
+【画像の種類と抽出方針】
+1. スーパー・コンビニ等のレシートで品目と金額が読める場合
+   - 各購入品目を1件ずつ出力する
+   - storeName は店名、itemName は商品名、description は「店名 / 商品名」
+   - 税・ポイント・値引・小計・合計行は品目に含めない（値引行は負の amount でも可だが、合計行は出さない）
+   - 例: 牛乳・食パン → 食費、洗剤・ティッシュ → 日用品、弁当・総菜で外食寄りのものは外食費でも可（迷ったら食費）
+2. 品目内訳が読めず合計金額しか分からない場合
+   - itemsReadable 相当として 1件だけ返す
+   - description / storeName に店名、itemName は null、amount は合計金額
+   - 店名からカテゴリを推測（例: 飲食店 → 外食費、スーパー → 食費）
+3. クレジットカード／銀行の利用明細画像の場合
+   - 各利用行を1件ずつ返す（storeName は加盟店名、itemName は null）
+   - description は加盟店名
+
+【出力形式】JSON 配列のみ（説明文不要）:
 [
   {
-    "date": "2024-01-15",
-    "description": "利用先名",
-    "amount": 1500
-  },
-  ...
+    "date": "YYYY-MM-DD",
+    "storeName": "店名",
+    "itemName": "品目名またはnull",
+    "description": "表示用の説明（店名 / 品目 または 店名）",
+    "amount": 1500,
+    "categoryName": "食費"
+  }
 ]
 
-JSON 配列のみを返してください（説明文不要）。`,
+制約:
+- date は YYYY-MM-DD。不明なら今日の日付ではなく、画像から読める最も確からしい日付。完全不明なら null ではなく画像内の他の手がかりから推定し、どうしても無理なら省略せず空文字 "" ではなく可能な限り埋める
+- amount は円単位の整数（正の購入額）
+- categoryName が候補に無い場合は null
+- JSON 配列のみを返す`,
           },
         ],
       },
@@ -302,5 +349,67 @@ JSON 配列のみを返してください（説明文不要）。`,
   const arrayMatch = text.match(/\[[\s\S]*\]/);
   if (!arrayMatch) return [];
 
-  return JSON.parse(arrayMatch[0]);
+  const parsed: unknown = JSON.parse(arrayMatch[0]);
+  if (!Array.isArray(parsed)) return [];
+
+  const nameSet = new Set(categoryNames);
+
+  return parsed
+    .map((raw): ExtractedImageTransaction | null => {
+      if (!raw || typeof raw !== "object") return null;
+      const row = raw as Record<string, unknown>;
+      const amount = Math.round(Number(row.amount));
+      if (!Number.isFinite(amount) || amount === 0) return null;
+
+      const storeName =
+        typeof row.storeName === "string" && row.storeName.trim()
+          ? row.storeName.trim()
+          : null;
+      const itemName =
+        typeof row.itemName === "string" && row.itemName.trim()
+          ? row.itemName.trim()
+          : null;
+      let description =
+        typeof row.description === "string" ? row.description.trim() : "";
+      if (!description) {
+        description =
+          storeName && itemName
+            ? `${storeName} / ${itemName}`
+            : storeName || itemName || "不明な支出";
+      }
+
+      const dateRaw = typeof row.date === "string" ? row.date.trim() : "";
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(dateRaw)
+        ? dateRaw
+        : new Date().toISOString().slice(0, 10);
+
+      let categoryName: string | null =
+        typeof row.categoryName === "string" ? row.categoryName.trim() : null;
+      if (
+        !categoryName ||
+        categoryName === "未分類" ||
+        categoryName.toLowerCase() === "null" ||
+        categoryName.toLowerCase() === "unidentified"
+      ) {
+        categoryName = null;
+      } else if (nameSet.size > 0 && !nameSet.has(categoryName)) {
+        // 表記ゆれの簡易吸収
+        const fuzzy = [...nameSet].find(
+          (n) =>
+            n.replace(/[・\s]/g, "") === categoryName!.replace(/[・\s]/g, "")
+        );
+        categoryName = fuzzy ?? null;
+      }
+
+      return {
+        date,
+        description,
+        amount,
+        storeName,
+        itemName,
+        categoryName,
+      };
+    })
+    .filter((x): x is ExtractedImageTransaction => x !== null);
 }
+

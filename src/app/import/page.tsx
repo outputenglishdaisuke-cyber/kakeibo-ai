@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { CategorySelect } from "@/components/ui/category-select";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Category, ParsedTransaction } from "@/types";
 import {
@@ -15,6 +16,7 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  Receipt,
 } from "lucide-react";
 
 type TabType = "csv" | "manual" | "image";
@@ -30,6 +32,17 @@ interface ProgressState {
   total: number;
   detectedCount: number;
 }
+
+type ConfirmRow =
+  | {
+      kind: "group-header";
+      key: string;
+      storeName: string;
+      date: string;
+      itemCount: number;
+      totalAmount: number;
+    }
+  | { kind: "item"; key: string; tx: ParsedTransaction; index: number };
 
 const PAGE_SIZE = 50;
 
@@ -51,6 +64,54 @@ function isCsvFile(file: File) {
 
 function isImageFile(file: File) {
   return file.type.startsWith("image/") || /\.(jpe?g|png|gif|webp)$/i.test(file.name);
+}
+
+function sourceLabel(source: ParsedTransaction["source"]) {
+  if (source === "CSV") return "CSV";
+  if (source === "IMAGE") return "画像";
+  return "手入力";
+}
+
+/** 同一レシートの品目をグループ化し、表示用の行配列を作る */
+function buildConfirmRows(items: ParsedTransaction[]): ConfirmRow[] {
+  const rows: ConfirmRow[] = [];
+  let i = 0;
+  while (i < items.length) {
+    const tx = items[i];
+    const groupId = tx.receiptGroupId;
+    if (groupId) {
+      let j = i;
+      while (j < items.length && items[j].receiptGroupId === groupId) j += 1;
+      const group = items.slice(i, j);
+      if (group.length > 1) {
+        const storeName =
+          group.find((g) => g.storeName)?.storeName ||
+          group[0].description.split(" / ")[0] ||
+          "レシート";
+        rows.push({
+          kind: "group-header",
+          key: `hdr-${groupId}`,
+          storeName,
+          date: group[0].date,
+          itemCount: group.length,
+          totalAmount: group.reduce((s, g) => s + g.amount, 0),
+        });
+      }
+      for (let k = i; k < j; k++) {
+        rows.push({
+          kind: "item",
+          key: `item-${k}`,
+          tx: items[k],
+          index: k,
+        });
+      }
+      i = j;
+    } else {
+      rows.push({ kind: "item", key: `item-${i}`, tx, index: i });
+      i += 1;
+    }
+  }
+  return rows;
 }
 
 export default function ImportPage() {
@@ -82,13 +143,18 @@ export default function ImportPage() {
   }, []);
 
   const totalPages = Math.max(1, Math.ceil(parsed.length / PAGE_SIZE));
-  const pagedItems = useMemo(() => {
+  const pagedParsed = useMemo(() => {
     const start = (page - 1) * PAGE_SIZE;
-    return parsed.slice(start, start + PAGE_SIZE).map((tx, i) => ({
-      tx,
-      index: start + i,
-    }));
+    return parsed.slice(start, start + PAGE_SIZE);
   }, [parsed, page]);
+
+  const confirmRows = useMemo(
+    () => buildConfirmRows(pagedParsed),
+    [pagedParsed]
+  );
+
+  /** ページ先頭オフセットを加味したグローバル index */
+  const pageOffset = (page - 1) * PAGE_SIZE;
 
   const classifiedCount = useMemo(
     () => parsed.filter((tx) => tx.categoryId).length,
@@ -221,11 +287,18 @@ export default function ImportPage() {
           errors.push({ name: file.name, error: data.error ?? "解析に失敗しました" });
           continue;
         }
+        const groupId =
+          typeof data.receiptGroupId === "string"
+            ? data.receiptGroupId
+            : `receipt-${file.name}-${Date.now()}`;
         const txs: ParsedTransaction[] = (data.transactions ?? []).map(
           (tx: ParsedTransaction) => ({
             ...tx,
             amount: Math.round(Number(tx.amount)),
             source: "IMAGE" as const,
+            receiptGroupId: tx.receiptGroupId ?? groupId,
+            storeName: tx.storeName ?? null,
+            itemName: tx.itemName ?? null,
           })
         );
         if (txs.length === 0) {
@@ -420,7 +493,7 @@ export default function ImportPage() {
           <CardTitle>
             {tab === "csv" && "CSV ファイルをアップロード（複数可）"}
             {tab === "manual" && "手動で支出を入力"}
-            {tab === "image" && "利用明細の画像をアップロード（複数可）"}
+            {tab === "image" && "レシート／利用明細の画像をアップロード（複数可）"}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -536,8 +609,8 @@ export default function ImportPage() {
           {tab === "image" && (
             <div className="space-y-4">
               <p className="text-sm text-gray-500">
-                複数の利用明細画像をまとめて選択できます。1枚ずつ順に解析し、失敗した画像以外の結果は保持されます。
-                スマホではカメラ撮影にも対応します。
+                レシートや利用明細の画像を複数選択できます。レシートは品目ごとに分割・分類し、
+                品目が読めない場合は店名ベースの1件として扱います。1枚ずつ順に解析します。
               </p>
               <label
                 onDragOver={(e) => {
@@ -635,8 +708,8 @@ export default function ImportPage() {
               </div>
             </div>
             <p className="mt-1 text-sm text-gray-500">
-              AIが店名からカテゴリを自動提案しています（{classifiedCount}/{parsed.length}件に分類済み）。
-              プルダウンで変更できます。個別ルールがある場合はルールが優先されます。
+              AIがカテゴリを自動提案しています（{classifiedCount}/{parsed.length}件に分類済み）。
+              プルダウンでその場で変更できます。同一レシートから分割された品目はグループ表示されます。
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -647,7 +720,7 @@ export default function ImportPage() {
                   <thead className="sticky top-0 bg-white">
                     <tr className="border-b border-gray-200 text-left text-gray-500">
                       <th className="px-4 py-3 font-medium">日付</th>
-                      <th className="px-4 py-3 font-medium">利用先</th>
+                      <th className="px-4 py-3 font-medium">利用先 / 品目</th>
                       <th className="px-4 py-3 font-medium">金額</th>
                       <th className="px-4 py-3 font-medium">カテゴリ</th>
                       <th className="px-4 py-3 font-medium">ソース</th>
@@ -655,92 +728,154 @@ export default function ImportPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {pagedItems.map(({ tx, index }) => (
-                      <tr key={`${tx.date}-${tx.description}-${index}`} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 text-gray-600">{formatDate(tx.date)}</td>
-                        <td className="px-4 py-3 font-medium">{tx.description}</td>
-                        <td className="px-4 py-3 text-right">{formatCurrency(tx.amount)}</td>
-                        <td className="px-4 py-3">
-                          <select
-                            className="min-w-[140px] rounded border border-gray-300 px-2 py-1.5 text-sm"
-                            value={tx.categoryId ?? ""}
-                            onChange={(e) => updateCategory(index, e.target.value)}
-                          >
-                            <option value="">未分類</option>
-                            {categories.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-                            {tx.source === "CSV"
-                              ? "CSV"
-                              : tx.source === "IMAGE"
-                                ? "画像"
-                                : "手入力"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <button
-                            onClick={() => removeItem(index)}
-                            className="text-xs text-red-400 hover:text-red-600"
-                          >
-                            削除
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {confirmRows.map((row) => {
+                      if (row.kind === "group-header") {
+                        return (
+                          <tr key={row.key} className="bg-indigo-50/60">
+                            <td colSpan={6} className="px-4 py-2.5">
+                              <div className="flex flex-wrap items-center gap-2 text-sm text-indigo-900">
+                                <Receipt className="h-4 w-4 flex-shrink-0" />
+                                <span className="font-semibold">{row.storeName}</span>
+                                <span className="text-indigo-700">
+                                  {formatDate(row.date)}
+                                </span>
+                                <span className="rounded-full bg-white/80 px-2 py-0.5 text-xs">
+                                  {row.itemCount}品目
+                                </span>
+                                <span className="text-xs text-indigo-700">
+                                  小計 {formatCurrency(row.totalAmount)}
+                                </span>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      }
+                      const { tx, index: localIndex } = row;
+                      const index = pageOffset + localIndex;
+                      return (
+                        <tr
+                          key={row.key}
+                          className={`hover:bg-gray-50 ${
+                            tx.receiptGroupId ? "bg-indigo-50/20" : ""
+                          }`}
+                        >
+                          <td className="px-4 py-3 text-gray-600">
+                            {formatDate(tx.date)}
+                          </td>
+                          <td className="px-4 py-3 font-medium">
+                            {tx.itemName ? (
+                              <div>
+                                <p>{tx.itemName}</p>
+                                {tx.storeName && (
+                                  <p className="text-xs font-normal text-gray-500">
+                                    {tx.storeName}
+                                  </p>
+                                )}
+                              </div>
+                            ) : (
+                              tx.description
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {formatCurrency(tx.amount)}
+                          </td>
+                          <td className="px-4 py-3">
+                            <CategorySelect
+                              compact
+                              categories={categories}
+                              value={tx.categoryId}
+                              onChange={(id) => updateCategory(index, id)}
+                            />
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                              {sourceLabel(tx.source)}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <button
+                              onClick={() => removeItem(index)}
+                              className="text-xs text-red-400 hover:text-red-600"
+                            >
+                              削除
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
 
               {/* スマホ: カード */}
               <div className="space-y-3 p-3 md:hidden">
-                {pagedItems.map(({ tx, index }) => (
-                  <div
-                    key={`${tx.date}-${tx.description}-${index}`}
-                    className="rounded-xl border border-gray-200 p-4"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs text-gray-500">{formatDate(tx.date)}</p>
-                        <p className="mt-1 truncate font-medium text-gray-900">
-                          {tx.description}
+                {confirmRows.map((row) => {
+                  if (row.kind === "group-header") {
+                    return (
+                      <div
+                        key={row.key}
+                        className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900"
+                      >
+                        <div className="flex items-center gap-2 font-semibold">
+                          <Receipt className="h-4 w-4" />
+                          {row.storeName}
+                        </div>
+                        <p className="mt-1 text-xs text-indigo-700">
+                          {formatDate(row.date)} ・ {row.itemCount}品目 ・ 小計{" "}
+                          {formatCurrency(row.totalAmount)}
                         </p>
-                        <span className="mt-2 inline-block rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-                          {tx.source === "CSV"
-                            ? "CSV"
-                            : tx.source === "IMAGE"
-                              ? "画像"
-                              : "手入力"}
-                        </span>
                       </div>
-                      <p className="flex-shrink-0 font-bold">{formatCurrency(tx.amount)}</p>
+                    );
+                  }
+                  const { tx, index: localIndex } = row;
+                  const index = pageOffset + localIndex;
+                  return (
+                    <div
+                      key={row.key}
+                      className={`rounded-xl border p-4 ${
+                        tx.receiptGroupId
+                          ? "border-indigo-200 bg-indigo-50/20"
+                          : "border-gray-200"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs text-gray-500">
+                            {formatDate(tx.date)}
+                          </p>
+                          <p className="mt-1 truncate font-medium text-gray-900">
+                            {tx.itemName || tx.description}
+                          </p>
+                          {tx.itemName && tx.storeName && (
+                            <p className="mt-0.5 text-xs text-gray-500">
+                              {tx.storeName}
+                            </p>
+                          )}
+                          <span className="mt-2 inline-block rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                            {sourceLabel(tx.source)}
+                          </span>
+                        </div>
+                        <p className="flex-shrink-0 font-bold">
+                          {formatCurrency(tx.amount)}
+                        </p>
+                      </div>
+                      <div className="mt-3">
+                        <CategorySelect
+                          categories={categories}
+                          value={tx.categoryId}
+                          onChange={(id) => updateCategory(index, id)}
+                        />
+                      </div>
+                      <Button
+                        variant="outline"
+                        className="mt-3 w-full text-red-500"
+                        onClick={() => removeItem(index)}
+                      >
+                        削除
+                      </Button>
                     </div>
-                    <select
-                      className="mt-3 h-11 w-full rounded-lg border border-gray-300 px-3 text-base"
-                      value={tx.categoryId ?? ""}
-                      onChange={(e) => updateCategory(index, e.target.value)}
-                    >
-                      <option value="">未分類</option>
-                      {categories.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                    <Button
-                      variant="outline"
-                      className="mt-3 w-full text-red-500"
-                      onClick={() => removeItem(index)}
-                    >
-                      削除
-                    </Button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
