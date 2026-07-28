@@ -1,10 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import type { ParsedTransaction } from "@/types";
+import type { Category, ParsedTransaction } from "@/types";
 import {
   Upload,
   FileText,
@@ -56,6 +56,7 @@ function isImageFile(file: File) {
 export default function ImportPage() {
   const [tab, setTab] = useState<TabType>("csv");
   const [parsed, setParsed] = useState<ParsedTransaction[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -73,6 +74,13 @@ export default function ImportPage() {
     amount: "",
   });
 
+  useEffect(() => {
+    fetch("/api/categories")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setCategories(Array.isArray(data) ? data : []))
+      .catch(() => setCategories([]));
+  }, []);
+
   const totalPages = Math.max(1, Math.ceil(parsed.length / PAGE_SIZE));
   const pagedItems = useMemo(() => {
     const start = (page - 1) * PAGE_SIZE;
@@ -82,9 +90,37 @@ export default function ImportPage() {
     }));
   }, [parsed, page]);
 
+  const classifiedCount = useMemo(
+    () => parsed.filter((tx) => tx.categoryId).length,
+    [parsed]
+  );
+
   const appendTransactions = (items: ParsedTransaction[]) => {
     setParsed((prev) => [...prev, ...items]);
     setPage(1);
+  };
+
+  const updateCategory = (index: number, categoryId: string) => {
+    setParsed((prev) =>
+      prev.map((tx, i) => {
+        if (i !== index) return tx;
+        if (!categoryId) {
+          return {
+            ...tx,
+            categoryId: null,
+            categoryName: null,
+            categoryColor: null,
+          };
+        }
+        const cat = categories.find((c) => c.id === categoryId);
+        return {
+          ...tx,
+          categoryId,
+          categoryName: cat?.name ?? null,
+          categoryColor: cat?.color ?? null,
+        };
+      })
+    );
   };
 
   const processCsvFiles = async (files: File[]) => {
@@ -137,8 +173,13 @@ export default function ImportPage() {
     if (merged.length > 0) {
       setMessage({
         type: "success",
-        text: `${files.length}件中${files.length - errors.length}件のCSVから合計${merged.length}件の明細を検出しました`,
+        text: `${files.length}件中${files.length - errors.length}件のCSVから合計${merged.length}件の明細を検出し、AIがカテゴリを提案しました`,
       });
+      // カテゴリ一覧を最新化（seed直後のため）
+      fetch("/api/categories")
+        .then((r) => (r.ok ? r.json() : []))
+        .then((data) => setCategories(Array.isArray(data) ? data : []))
+        .catch(() => undefined);
     } else if (errors.length > 0) {
       setMessage({
         type: "error",
@@ -594,7 +635,8 @@ export default function ImportPage() {
               </div>
             </div>
             <p className="mt-1 text-sm text-gray-500">
-              CSV・画像・手入力の明細をまとめて確認できます。保存時にAIがカテゴリを自動分類します。不要な行は削除してください。
+              AIが店名からカテゴリを自動提案しています（{classifiedCount}/{parsed.length}件に分類済み）。
+              プルダウンで変更できます。個別ルールがある場合はルールが優先されます。
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -607,6 +649,7 @@ export default function ImportPage() {
                       <th className="px-4 py-3 font-medium">日付</th>
                       <th className="px-4 py-3 font-medium">利用先</th>
                       <th className="px-4 py-3 font-medium">金額</th>
+                      <th className="px-4 py-3 font-medium">カテゴリ</th>
                       <th className="px-4 py-3 font-medium">ソース</th>
                       <th className="px-4 py-3 font-medium">削除</th>
                     </tr>
@@ -617,6 +660,20 @@ export default function ImportPage() {
                         <td className="px-4 py-3 text-gray-600">{formatDate(tx.date)}</td>
                         <td className="px-4 py-3 font-medium">{tx.description}</td>
                         <td className="px-4 py-3 text-right">{formatCurrency(tx.amount)}</td>
+                        <td className="px-4 py-3">
+                          <select
+                            className="min-w-[140px] rounded border border-gray-300 px-2 py-1.5 text-sm"
+                            value={tx.categoryId ?? ""}
+                            onChange={(e) => updateCategory(index, e.target.value)}
+                          >
+                            <option value="">未分類</option>
+                            {categories.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
                         <td className="px-4 py-3">
                           <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
                             {tx.source === "CSV"
@@ -663,6 +720,18 @@ export default function ImportPage() {
                       </div>
                       <p className="flex-shrink-0 font-bold">{formatCurrency(tx.amount)}</p>
                     </div>
+                    <select
+                      className="mt-3 h-11 w-full rounded-lg border border-gray-300 px-3 text-base"
+                      value={tx.categoryId ?? ""}
+                      onChange={(e) => updateCategory(index, e.target.value)}
+                    >
+                      <option value="">未分類</option>
+                      {categories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
                     <Button
                       variant="outline"
                       className="mt-3 w-full text-red-500"

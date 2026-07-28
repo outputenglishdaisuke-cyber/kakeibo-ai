@@ -3,6 +3,7 @@ export type Source = "CSV" | "MANUAL" | "IMAGE";
 export interface Category {
   id: string;
   name: string;
+  description?: string | null;
   color: string;
   icon?: string | null;
   createdAt: Date;
@@ -72,6 +73,9 @@ export interface ParsedTransaction {
   description: string;
   amount: number;
   source: Source;
+  categoryId?: string | null;
+  categoryName?: string | null;
+  categoryColor?: string | null;
 }
 
 // AI レスポンス

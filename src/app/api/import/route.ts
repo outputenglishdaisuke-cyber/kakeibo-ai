@@ -6,13 +6,13 @@ import {
 } from "@/lib/csv-parser";
 import { decodeCsvBuffer, CsvEncodingError } from "@/lib/csv-encoding";
 import { analyzeCsvStructure } from "@/lib/classifiers";
+import { classifyParsedTransactions } from "@/lib/classify-pipeline";
 
 const STRUCTURE_ERROR =
   "このCSVの構造を自動認識できませんでした。手入力または別の形式でお試しください";
 
 /**
- * CSV を受け取り、Claude で構造解析したうえで取引リストを返す。
- * 1リクエストにつき1ファイル。DB保存は /api/import/confirm。
+ * CSV を受け取り、Claude で構造解析・カテゴリ自動分類したうえで取引リストを返す。
  */
 export async function POST(req: NextRequest) {
   try {
@@ -48,7 +48,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 先頭15行だけを Claude に渡し、構造を判定させる
     const sample = buildCsvSampleForAi(matrix, 15);
     const structure = await analyzeCsvStructure(sample);
 
@@ -73,9 +72,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const transactions = mapMatrixToTransactions(matrix, structure);
+    const rawTransactions = mapMatrixToTransactions(matrix, structure);
 
-    if (transactions.length === 0) {
+    if (rawTransactions.length === 0) {
       return NextResponse.json(
         {
           error: STRUCTURE_ERROR,
@@ -87,6 +86,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // 個別ルール → AI 分類（デフォルトカテゴリが無ければ投入）
+    const transactions = await classifyParsedTransactions(rawTransactions, {
+      autoClassify: true,
+    });
+
     return NextResponse.json({
       fileName: file.name,
       encoding,
@@ -95,6 +99,7 @@ export async function POST(req: NextRequest) {
       totalRows: matrix.length,
     });
   } catch (err) {
+    console.error("[/api/import] failed:", err);
     const message = err instanceof Error ? err.message : "CSV の解析に失敗しました";
     return NextResponse.json({ error: message }, { status: 500 });
   }

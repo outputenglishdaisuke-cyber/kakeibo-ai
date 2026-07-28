@@ -19,8 +19,8 @@ interface CategoryWithCount extends Category {
 export default function CategoriesPage() {
   const [categories, setCategories] = useState<CategoryWithCount[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState({ name: "", color: PRESET_COLORS[0] });
-  const [editForm, setEditForm] = useState({ name: "", color: "" });
+  const [form, setForm] = useState({ name: "", description: "", color: PRESET_COLORS[0] });
+  const [editForm, setEditForm] = useState({ name: "", description: "", color: "" });
   const [loading, setLoading] = useState(true);
 
   const fetchCategories = async () => {
@@ -39,13 +39,13 @@ export default function CategoriesPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
     });
-    setForm({ name: "", color: PRESET_COLORS[0] });
+    setForm({ name: "", description: "", color: PRESET_COLORS[0] });
     fetchCategories();
   };
 
   const startEdit = (cat: CategoryWithCount) => {
     setEditingId(cat.id);
-    setEditForm({ name: cat.name, color: cat.color });
+    setEditForm({ name: cat.name, description: cat.description ?? "", color: cat.color });
   };
 
   const saveEdit = async (id: string) => {
@@ -107,6 +107,16 @@ export default function CategoriesPage() {
                 onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
               />
             </div>
+            <div className="w-full md:min-w-[240px] md:flex-1">
+              <label className="mb-1 block text-xs font-medium text-gray-700">説明</label>
+              <input
+                type="text"
+                className="h-11 w-full rounded-lg border border-gray-300 px-3 text-base focus:border-indigo-500 focus:outline-none md:h-auto md:py-2 md:text-sm"
+                placeholder="例: スーパー等の食料品"
+                value={form.description}
+                onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))}
+              />
+            </div>
             <div className="w-full md:w-auto">
               <label className="mb-1 block text-xs font-medium text-gray-700">カラー</label>
               {colorPicker(form.color, (c) => setForm((p) => ({ ...p, color: c })))}
@@ -143,9 +153,16 @@ export default function CategoriesPage() {
                     <div className="flex w-full flex-col gap-3 md:flex-row md:items-center md:gap-4">
                       <input
                         type="text"
-                        className="h-11 w-full rounded-lg border border-gray-300 px-3 text-base focus:border-indigo-500 focus:outline-none md:h-auto md:flex-1 md:py-1.5 md:text-sm"
+                        className="h-11 w-full rounded-lg border border-gray-300 px-3 text-base focus:border-indigo-500 focus:outline-none md:h-auto md:w-40 md:py-1.5 md:text-sm"
                         value={editForm.name}
                         onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
+                      />
+                      <input
+                        type="text"
+                        className="h-11 w-full rounded-lg border border-gray-300 px-3 text-base focus:border-indigo-500 focus:outline-none md:h-auto md:flex-1 md:py-1.5 md:text-sm"
+                        value={editForm.description}
+                        onChange={(e) => setEditForm((p) => ({ ...p, description: e.target.value }))}
+                        placeholder="説明"
                       />
                       {colorPicker(
                         editForm.color,
@@ -178,9 +195,16 @@ export default function CategoriesPage() {
                           className="h-4 w-4 flex-shrink-0 rounded-full"
                           style={{ backgroundColor: cat.color }}
                         />
-                        <span className="truncate text-base font-medium md:text-sm">
-                          {cat.name}
-                        </span>
+                        <div className="min-w-0 flex-1">
+                          <span className="block truncate text-base font-medium md:text-sm">
+                            {cat.name}
+                          </span>
+                          {cat.description && (
+                            <span className="block truncate text-xs text-gray-500">
+                              {cat.description}
+                            </span>
+                          )}
+                        </div>
                         <span className="text-xs text-gray-400">
                           {cat._count?.transactions ?? 0}件
                         </span>

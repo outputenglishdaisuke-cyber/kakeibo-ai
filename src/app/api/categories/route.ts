@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { ensureDefaultCategories } from "@/lib/default-categories";
 import { z } from "zod";
 
 const categorySchema = z.object({
   name: z.string().min(1).max(50),
+  description: z.string().max(200).optional().nullable(),
   color: z
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
@@ -12,6 +14,7 @@ const categorySchema = z.object({
 });
 
 export async function GET() {
+  await ensureDefaultCategories();
   const categories = await prisma.category.findMany({
     orderBy: { name: "asc" },
     include: { _count: { select: { transactions: true } } },

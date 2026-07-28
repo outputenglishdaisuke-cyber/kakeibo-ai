@@ -41,11 +41,15 @@ export async function POST(req: NextRequest) {
     const base64 = Buffer.from(buffer).toString("base64");
 
     const extracted = await extractTransactionsFromImage(base64, mediaType);
-    const transactions = extracted.map((tx) => ({
-      ...tx,
+    const raw = extracted.map((tx) => ({
+      date: tx.date,
+      description: tx.description,
       amount: Math.round(tx.amount),
       source: "IMAGE" as const,
     }));
+
+    const { classifyParsedTransactions } = await import("@/lib/classify-pipeline");
+    const transactions = await classifyParsedTransactions(raw, { autoClassify: true });
 
     return NextResponse.json({
       fileName: file.name,

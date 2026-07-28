@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { classifyTransactions } from "@/lib/classifiers";
+import { classifyParsedTransactions } from "@/lib/classify-pipeline";
+import { ensureDefaultCategories } from "@/lib/default-categories";
 import { z } from "zod";
 
 const transactionSchema = z.object({
@@ -11,6 +12,7 @@ const transactionSchema = z.object({
     .int()
     .refine((n) => n !== 0, { message: "amount must be non-zero" }),
   source: z.enum(["CSV", "MANUAL", "IMAGE"]).default("CSV"),
+  categoryId: z.string().nullable().optional(),
 });
 
 const confirmSchema = z.object({
@@ -19,7 +21,6 @@ const confirmSchema = z.object({
 });
 
 function parseDate(raw: string): Date | null {
-  // YYYY-MM-DD（CSV解析後の正規化形式）または Date パース可能な文字列
   const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (iso) {
     const d = new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])));
@@ -30,10 +31,8 @@ function parseDate(raw: string): Date | null {
 }
 
 /**
- * ユーザーが確認済みの取引リストを DB に保存する。
- * autoClassify=true の場合は AI で自動分類する。
- *
- * 件数が多い場合でもタイムアウトしないよう createManyAndReturn で一括 INSERT する。
+ * 確認済みの取引を DB に保存する。
+ * クライアント側で選んだ categoryId を優先し、未設定ならルール → AI で補完する。
  */
 export async function POST(req: NextRequest) {
   try {
@@ -45,7 +44,6 @@ export async function POST(req: NextRequest) {
 
     const { transactions, autoClassify } = parsed.data;
 
-    // 日付の妥当性チェック
     const invalidDates = transactions
       .map((tx, i) => ({ i, date: tx.date, parsed: parseDate(tx.date) }))
       .filter((x) => x.parsed === null);
@@ -59,63 +57,45 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const categories = await prisma.category.findMany();
+    const categories = await ensureDefaultCategories();
     const categoryIdSet = new Set(categories.map((c) => c.id));
-    const rules = await prisma.rule.findMany({ include: { category: true } });
+    const categoryById = new Map(categories.map((c) => [c.id, c]));
 
-    // ルールベースの分類を先に適用
-    const categorized = transactions.map((tx) => {
-      const matched = rules
-        .filter((r) =>
-          tx.description.toLowerCase().includes(r.keyword.toLowerCase())
-        )
-        .sort((a, b) => b.priority - a.priority)[0];
+    // クライアント指定の categoryId を検証
+    const withClientCategory = transactions.map((tx) => ({
+      ...tx,
+      categoryId:
+        tx.categoryId && categoryIdSet.has(tx.categoryId) ? tx.categoryId : null,
+    }));
 
-      const categoryId =
-        matched?.categoryId && categoryIdSet.has(matched.categoryId)
-          ? matched.categoryId
-          : null;
+    // 未分類のみルール → AI
+    const needClassify = withClientCategory.some((tx) => tx.categoryId === null);
+    let finalized = withClientCategory;
 
-      return {
-        ...tx,
-        dateObj: parseDate(tx.date)!,
-        categoryId,
-      };
-    });
+    if (needClassify) {
+      const classified = await classifyParsedTransactions(
+        withClientCategory.map((tx) => ({
+          date: tx.date,
+          description: tx.description,
+          amount: tx.amount,
+          source: tx.source,
+        })),
+        { autoClassify }
+      );
 
-    // ルールでカバーできなかった取引を AI で分類
-    if (autoClassify && categories.length > 0) {
-      const uncategorizedIndices = categorized
-        .map((tx, i) => (tx.categoryId === null ? i : -1))
-        .filter((i) => i !== -1);
-
-      if (uncategorizedIndices.length > 0) {
-        // API のトークン制限を避けるため、一定件数ずつ分類
-        const CHUNK = 40;
-        for (let offset = 0; offset < uncategorizedIndices.length; offset += CHUNK) {
-          const chunkIndices = uncategorizedIndices.slice(offset, offset + CHUNK);
-          const chunk = chunkIndices.map((i) => categorized[i]);
-          const results = await classifyTransactions(
-            chunk.map((tx) => ({ description: tx.description, amount: tx.amount })),
-            categories
-          );
-
-          results.forEach((result, j) => {
-            const idx = chunkIndices[j];
-            const id = result.suggestedCategoryId;
-            // 存在しないカテゴリ ID は無視（FK 違反防止）
-            if (id && categoryIdSet.has(id)) {
-              categorized[idx].categoryId = id;
-            }
-          });
-        }
-      }
+      finalized = withClientCategory.map((tx, i) => {
+        if (tx.categoryId) return tx;
+        const c = classified[i];
+        return {
+          ...tx,
+          categoryId: c?.categoryId ?? null,
+        };
+      });
     }
 
-    // 一括 INSERT（インタラクティブトランザクションの 5 秒制限を回避）
     const created = await prisma.transaction.createManyAndReturn({
-      data: categorized.map((tx) => ({
-        date: tx.dateObj,
+      data: finalized.map((tx) => ({
+        date: parseDate(tx.date)!,
         description: tx.description,
         amount: tx.amount,
         source: tx.source,
@@ -124,8 +104,6 @@ export async function POST(req: NextRequest) {
       })),
     });
 
-    // カテゴリ情報を付与して返す
-    const categoryById = new Map(categories.map((c) => [c.id, c]));
     const withCategory = created.map((tx) => ({
       ...tx,
       category: tx.categoryId ? categoryById.get(tx.categoryId) ?? null : null,

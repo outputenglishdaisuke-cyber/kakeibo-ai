@@ -139,52 +139,74 @@ ${csvSample}
 
 /**
  * 複数の取引を一括で AI 分類する。
- * categories を毎回渡すことで、新しいカテゴリに追従できる。
+ * 店名から主な取扱を推測し、カテゴリ説明を含む候補から1つ選ばせる。
  */
 export async function classifyTransactions(
   transactions: { description: string; amount: number }[],
   categories: Category[]
 ): Promise<ClassificationResult[]> {
   if (transactions.length === 0) return [];
+  if (categories.length === 0) return [];
 
   const categoryList = categories
-    .map((c) => `- ${c.name} (id: ${c.id})`)
+    .map(
+      (c) =>
+        `- 名前: ${c.name} / id: ${c.id}` +
+        (c.description ? ` / 説明: ${c.description}` : "")
+    )
     .join("\n");
 
+  const nameToId = new Map(categories.map((c) => [c.name, c.id]));
+  const idSet = new Set(categories.map((c) => c.id));
+
   const txList = transactions
-    .map((t, i) => `${i + 1}. ${t.description} (${t.amount}円)`)
+    .map((t, i) => `${i + 1}. 店名「${t.description}」（金額: ${t.amount}円）`)
     .join("\n");
 
   const message = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 1024,
+    max_tokens: 4096,
     messages: [
       {
         role: "user",
         content: `あなたは家計簿の支出分類アシスタントです。
-以下の支出項目を、指定されたカテゴリに分類してください。
+利用明細には「店名（加盟店名）」しかなく、購入した具体的な商品は分かりません。
+そのため、店名から「その店が主にどのようなものを取り扱っているか」を一般的な知識で推測し、最も可能性の高いカテゴリを1つ選んでください。
 
-【カテゴリ一覧】
+【分類の基本方針】
+- スーパー（イオン、ライフ、西友、業務スーパー、ビッグ・エー、ジェーソン等）→ 食費
+- コンビニ（セブンイレブン、ファミリーマート、ローソン等）→ 食費（迷ったら食費）
+- ドラッグストア（マツモトキヨシ、ウエルシア、ウェルパーク、クスリのナカヤマ等）→ 日用品
+- 100円ショップ（ダイソー、セリア等）→ 日用品（迷ったら日用品）
+- 飲食店・カフェ・ファストフード（すき家、スターバックス等）→ 外食費
+- 家具・家電量販・ホームセンター（ニトリ、コジマ、ヤマダ電機、IKEA、テックランド等）→ 特別費
+- 電力会社（東京電力、関西電力等）→ 電気
+- ガス会社（東京ガス等）→ ガス
+- 水道局 → 水道
+- 不動産・家賃引き落とし → 家賃
+- 動画/音楽配信、書店、ゲーム（Netflix、Kindle、Steam、NINTENDO、Jリーグチケット等）→ 趣味・嗜好・娯楽
+- 無印良品は日用品寄り（迷ったら日用品）
+- 判断がどうしてもつかない場合のみ suggestedCategoryId / suggestedCategoryName を null にする
+- 「未分類」「unidentified」というカテゴリ名は使わない（候補に無い）
+- 安易に null にせず、一般知識で妥当なら必ずいずれかのカテゴリを選ぶ
+
+【カテゴリ一覧（この中からのみ選択）】
 ${categoryList}
 
 【分類する支出】
 ${txList}
 
-各支出について、最も適切なカテゴリを選択し、以下の JSON 配列形式で返してください。
-カテゴリが該当しない場合は categoryId を null にしてください。
-確信度は 0.0〜1.0 で表してください。
+各支出について、以下の JSON 配列のみを返してください（説明文不要）。
+suggestedCategoryId には上記の id を正確にコピーしてください。名前だけの場合は suggestedCategoryName にカテゴリ名を入れてください。
 
 [
   {
     "index": 1,
     "suggestedCategoryId": "<id または null>",
-    "suggestedCategoryName": "<カテゴリ名>",
+    "suggestedCategoryName": "<カテゴリ名 または null>",
     "confidence": 0.9
-  },
-  ...
-]
-
-JSON 配列のみを返してください（説明文不要）。`,
+  }
+]`,
       },
     ],
   });
@@ -198,16 +220,37 @@ JSON 配列のみを返してください（説明文不要）。`,
   const parsed: {
     index: number;
     suggestedCategoryId: string | null;
-    suggestedCategoryName: string;
+    suggestedCategoryName: string | null;
     confidence: number;
   }[] = JSON.parse(arrayMatch[0]);
 
-  return parsed.map((item) => ({
-    description: transactions[item.index - 1]?.description ?? "",
-    suggestedCategoryId: item.suggestedCategoryId ?? undefined,
-    suggestedCategoryName: item.suggestedCategoryName,
-    confidence: item.confidence,
-  }));
+  return parsed.map((item) => {
+    let id =
+      item.suggestedCategoryId && idSet.has(item.suggestedCategoryId)
+        ? item.suggestedCategoryId
+        : null;
+    const name = item.suggestedCategoryName?.trim() || "";
+
+    // 「unidentified」「未分類」は無視
+    const invalidName =
+      !name ||
+      name.toLowerCase() === "unidentified" ||
+      name === "未分類" ||
+      name.toLowerCase() === "null";
+
+    if (!id && !invalidName && nameToId.has(name)) {
+      id = nameToId.get(name)!;
+    }
+
+    return {
+      description: transactions[item.index - 1]?.description ?? "",
+      suggestedCategoryId: id ?? undefined,
+      suggestedCategoryName: id
+        ? (categories.find((c) => c.id === id)?.name ?? name)
+        : "",
+      confidence: item.confidence ?? 0,
+    };
+  });
 }
 
 /**
