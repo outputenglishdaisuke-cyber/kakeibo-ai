@@ -44,7 +44,7 @@ export function mapRowsToTransactions(
     transactions.push({
       date: rawDate,
       description: rawDesc,
-      amount,
+      amount: Math.round(amount),
       source: "CSV",
     });
   }

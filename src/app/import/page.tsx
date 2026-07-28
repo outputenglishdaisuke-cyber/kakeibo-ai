@@ -1,27 +1,71 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { ParsedTransaction } from "@/types";
-import { Upload, FileText, Camera, PenLine, Check, AlertCircle } from "lucide-react";
+import {
+  Upload,
+  FileText,
+  Camera,
+  PenLine,
+  Check,
+  AlertCircle,
+  X,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 
 type TabType = "csv" | "manual" | "image";
 
-interface ParseResult {
-  transactions: ParsedTransaction[];
-  mapping?: { date: string; description: string; amount: string };
+interface FileFailure {
+  name: string;
+  error: string;
+}
+
+interface ProgressState {
+  kind: "csv" | "image";
+  current: number;
+  total: number;
+  detectedCount: number;
+}
+
+const PAGE_SIZE = 50;
+
+function collectFiles(
+  list: FileList | File[] | null,
+  accept: (file: File) => boolean
+): File[] {
+  if (!list) return [];
+  return Array.from(list).filter(accept);
+}
+
+function isCsvFile(file: File) {
+  return (
+    file.type === "text/csv" ||
+    file.type === "application/vnd.ms-excel" ||
+    /\.csv$/i.test(file.name)
+  );
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith("image/") || /\.(jpe?g|png|gif|webp)$/i.test(file.name);
 }
 
 export default function ImportPage() {
   const [tab, setTab] = useState<TabType>("csv");
-  const [parsed, setParsed] = useState<ParsedTransaction[] | null>(null);
+  const [parsed, setParsed] = useState<ParsedTransaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [failures, setFailures] = useState<FileFailure[]>([]);
+  const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [page, setPage] = useState(1);
 
-  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvFiles, setCsvFiles] = useState<File[]>([]);
+  const [imageFiles, setImageFiles] = useState<File[]>([]);
+  const [dragOver, setDragOver] = useState<"csv" | "image" | null>(null);
 
   const [manualForm, setManualForm] = useState({
     date: new Date().toISOString().split("T")[0],
@@ -29,50 +73,156 @@ export default function ImportPage() {
     amount: "",
   });
 
-  const [imageFile, setImageFile] = useState<File | null>(null);
+  const totalPages = Math.max(1, Math.ceil(parsed.length / PAGE_SIZE));
+  const pagedItems = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return parsed.slice(start, start + PAGE_SIZE).map((tx, i) => ({
+      tx,
+      index: start + i,
+    }));
+  }, [parsed, page]);
 
-  const handleCsvUpload = async () => {
-    if (!csvFile) return;
-    setLoading(true);
-    setMessage(null);
-    try {
-      const fd = new FormData();
-      fd.append("file", csvFile);
-      const res = await fetch("/api/import", { method: "POST", body: fd });
-      if (!res.ok) {
-        const err = await res.json();
-        setMessage({ type: "error", text: err.error ?? "エラーが発生しました" });
-        return;
-      }
-      const data: ParseResult = await res.json();
-      setParsed(data.transactions);
-    } catch {
-      setMessage({ type: "error", text: "CSV の解析に失敗しました" });
-    } finally {
-      setLoading(false);
-    }
+  const appendTransactions = (items: ParsedTransaction[]) => {
+    setParsed((prev) => [...prev, ...items]);
+    setPage(1);
   };
 
-  const handleImageUpload = async () => {
-    if (!imageFile) return;
+  const processCsvFiles = async (files: File[]) => {
+    if (files.length === 0) return;
     setLoading(true);
     setMessage(null);
-    try {
-      const fd = new FormData();
-      fd.append("file", imageFile);
-      const res = await fetch("/api/import/image", { method: "POST", body: fd });
-      if (!res.ok) {
-        const err = await res.json();
-        setMessage({ type: "error", text: err.error ?? "エラーが発生しました" });
-        return;
+    setFailures([]);
+    setProgress({ kind: "csv", current: 0, total: files.length, detectedCount: 0 });
+
+    const merged: ParsedTransaction[] = [];
+    const errors: FileFailure[] = [];
+    let detected = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setProgress({
+        kind: "csv",
+        current: i + 1,
+        total: files.length,
+        detectedCount: detected,
+      });
+
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/import", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) {
+          errors.push({ name: file.name, error: data.error ?? "解析に失敗しました" });
+          continue;
+        }
+        const txs: ParsedTransaction[] = (data.transactions ?? []).map(
+          (tx: ParsedTransaction) => ({ ...tx, source: "CSV" as const })
+        );
+        merged.push(...txs);
+        detected += txs.length;
+        setProgress({
+          kind: "csv",
+          current: i + 1,
+          total: files.length,
+          detectedCount: detected,
+        });
+      } catch {
+        errors.push({ name: file.name, error: "ネットワークエラーまたは解析失敗" });
       }
-      const data = await res.json();
-      setParsed(data.transactions);
-    } catch {
-      setMessage({ type: "error", text: "画像の解析に失敗しました" });
-    } finally {
-      setLoading(false);
     }
+
+    if (merged.length > 0) appendTransactions(merged);
+    setFailures(errors);
+    if (merged.length > 0) {
+      setMessage({
+        type: "success",
+        text: `${files.length}件中${files.length - errors.length}件のCSVから合計${merged.length}件の明細を検出しました`,
+      });
+    } else if (errors.length > 0) {
+      setMessage({
+        type: "error",
+        text: "読み込める明細がありませんでした",
+      });
+    }
+    setProgress(null);
+    setLoading(false);
+    setCsvFiles([]);
+  };
+
+  const processImageFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+    setLoading(true);
+    setMessage(null);
+    setFailures([]);
+    setProgress({ kind: "image", current: 0, total: files.length, detectedCount: 0 });
+
+    const merged: ParsedTransaction[] = [];
+    const errors: FileFailure[] = [];
+    let detected = 0;
+
+    // レート制限を避けるため画像は1枚ずつ順次処理
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setProgress({
+        kind: "image",
+        current: i + 1,
+        total: files.length,
+        detectedCount: detected,
+      });
+
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/import/image", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) {
+          errors.push({ name: file.name, error: data.error ?? "解析に失敗しました" });
+          continue;
+        }
+        const txs: ParsedTransaction[] = (data.transactions ?? []).map(
+          (tx: ParsedTransaction) => ({
+            ...tx,
+            amount: Math.round(Number(tx.amount)),
+            source: "IMAGE" as const,
+          })
+        );
+        if (txs.length === 0) {
+          errors.push({
+            name: file.name,
+            error: "取引を読み取れませんでした",
+          });
+          continue;
+        }
+        merged.push(...txs);
+        detected += txs.length;
+        setProgress({
+          kind: "image",
+          current: i + 1,
+          total: files.length,
+          detectedCount: detected,
+        });
+      } catch {
+        errors.push({ name: file.name, error: "ネットワークエラーまたは解析失敗" });
+      }
+    }
+
+    if (merged.length > 0) appendTransactions(merged);
+    setFailures(errors);
+    if (merged.length > 0) {
+      setMessage({
+        type: "success",
+        text: `${files.length}枚中${files.length - errors.length}枚の画像から合計${merged.length}件の明細を検出しました`,
+      });
+    } else if (errors.length > 0) {
+      setMessage({
+        type: "error",
+        text: "読み取れる明細がありませんでした",
+      });
+    }
+    setProgress(null);
+    setLoading(false);
+    setImageFiles([]);
   };
 
   const handleManualAdd = () => {
@@ -83,16 +233,25 @@ export default function ImportPage() {
       amount: parseInt(manualForm.amount, 10),
       source: "MANUAL",
     };
-    setParsed((prev) => [...(prev ?? []), tx]);
-    setManualForm({ date: new Date().toISOString().split("T")[0], description: "", amount: "" });
+    appendTransactions([tx]);
+    setManualForm({
+      date: new Date().toISOString().split("T")[0],
+      description: "",
+      amount: "",
+    });
   };
 
   const removeItem = (index: number) => {
-    setParsed((prev) => prev?.filter((_, i) => i !== index) ?? null);
+    setParsed((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      const nextPages = Math.max(1, Math.ceil(next.length / PAGE_SIZE));
+      if (page > nextPages) setPage(nextPages);
+      return next;
+    });
   };
 
   const confirmAndSave = async () => {
-    if (!parsed || parsed.length === 0) return;
+    if (parsed.length === 0) return;
     setSaving(true);
     setMessage(null);
     try {
@@ -107,12 +266,28 @@ export default function ImportPage() {
       }
       const data = await res.json();
       setMessage({ type: "success", text: `${data.count}件の取引を保存しました` });
-      setParsed(null);
-      setCsvFile(null);
-      setImageFile(null);
+      setParsed([]);
+      setFailures([]);
+      setCsvFiles([]);
+      setImageFiles([]);
+      setPage(1);
     } finally {
       setSaving(false);
     }
+  };
+
+  const onDropFiles = (
+    e: React.DragEvent,
+    kind: "csv" | "image"
+  ) => {
+    e.preventDefault();
+    setDragOver(null);
+    const files = collectFiles(
+      e.dataTransfer.files,
+      kind === "csv" ? isCsvFile : isImageFile
+    );
+    if (kind === "csv") setCsvFiles(files);
+    else setImageFiles(files);
   };
 
   const tabs: { key: TabType; label: string; icon: React.ReactNode }[] = [
@@ -137,20 +312,56 @@ export default function ImportPage() {
           }`}
         >
           {message.type === "success" ? (
-            <Check className="h-4 w-4" />
+            <Check className="h-4 w-4 flex-shrink-0" />
           ) : (
-            <AlertCircle className="h-4 w-4" />
+            <AlertCircle className="h-4 w-4 flex-shrink-0" />
           )}
           {message.text}
         </div>
       )}
 
-      {/* タブ: スマホでも見切れないよう全幅均等 */}
+      {failures.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="font-medium">
+            {failures.length}件のファイルは読み込めませんでした
+          </p>
+          <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto">
+            {failures.map((f) => (
+              <li key={`${f.name}-${f.error}`} className="break-all">
+                ・{f.name}: {f.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {progress && (
+        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
+          {progress.kind === "csv" ? (
+            <p>
+              {progress.total}件のファイルを読み込み中（{progress.current}/{progress.total}）…
+              {" "}合計{progress.detectedCount}件の明細を検出
+            </p>
+          ) : (
+            <p>
+              {progress.total}枚中{progress.current}枚を解析中…
+              {" "}合計{progress.detectedCount}件の明細を検出
+            </p>
+          )}
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-indigo-100">
+            <div
+              className="h-full rounded-full bg-indigo-500 transition-all"
+              style={{ width: `${(progress.current / progress.total) * 100}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       <div className="grid w-full grid-cols-3 gap-1 rounded-lg border border-gray-200 bg-gray-50 p-1 sm:flex sm:w-fit">
         {tabs.map((t) => (
           <button
             key={t.key}
-            onClick={() => { setTab(t.key); setParsed(null); }}
+            onClick={() => setTab(t.key)}
             className={`flex min-h-11 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-sm font-medium transition-colors sm:gap-2 sm:px-4 ${
               tab === t.key
                 ? "bg-white text-indigo-700 shadow-sm"
@@ -166,35 +377,74 @@ export default function ImportPage() {
       <Card>
         <CardHeader>
           <CardTitle>
-            {tab === "csv" && "CSV ファイルをアップロード"}
+            {tab === "csv" && "CSV ファイルをアップロード（複数可）"}
             {tab === "manual" && "手動で支出を入力"}
-            {tab === "image" && "利用明細の画像をアップロード"}
+            {tab === "image" && "利用明細の画像をアップロード（複数可）"}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {tab === "csv" && (
             <div className="space-y-4">
               <p className="text-sm text-gray-500">
-                カード会社のCSVをアップロードすると、AIが列を自動認識して支出を抽出します。
+                複数のカード会社CSVをまとめて選択できます。ファイルごとに列を自動推定し、明細を1つのリストに統合します。
               </p>
-              <label className="flex min-h-[140px] cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-gray-300 p-6 transition-colors hover:border-indigo-400 hover:bg-indigo-50/30 sm:p-10">
+              <label
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver("csv");
+                }}
+                onDragLeave={() => setDragOver(null)}
+                onDrop={(e) => onDropFiles(e, "csv")}
+                className={`flex min-h-[140px] cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-6 transition-colors sm:p-10 ${
+                  dragOver === "csv"
+                    ? "border-indigo-400 bg-indigo-50/50"
+                    : "border-gray-300 hover:border-indigo-400 hover:bg-indigo-50/30"
+                }`}
+              >
                 <Upload className="h-8 w-8 text-gray-400" />
                 <span className="px-2 text-center text-sm text-gray-500">
-                  {csvFile ? csvFile.name : "CSV ファイルをクリックまたはドロップ"}
+                  {csvFiles.length > 0
+                    ? `${csvFiles.length}件のCSVを選択中`
+                    : "CSV を複数選択、またはここにドロップ"}
                 </span>
                 <input
                   type="file"
-                  accept=".csv"
+                  accept=".csv,text/csv"
+                  multiple
                   className="hidden"
-                  onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
+                  onChange={(e) => {
+                    setCsvFiles(collectFiles(e.target.files, isCsvFile));
+                    e.target.value = "";
+                  }}
                 />
               </label>
+              {csvFiles.length > 0 && (
+                <ul className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-gray-100 bg-gray-50 p-3 text-sm text-gray-700">
+                  {csvFiles.map((f) => (
+                    <li key={`${f.name}-${f.size}`} className="flex items-center justify-between gap-2">
+                      <span className="truncate">{f.name}</span>
+                      <button
+                        type="button"
+                        className="flex-shrink-0 text-gray-400 hover:text-gray-600"
+                        onClick={() =>
+                          setCsvFiles((prev) => prev.filter((x) => x !== f))
+                        }
+                        aria-label={`${f.name} を除外`}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <Button
-                onClick={handleCsvUpload}
-                disabled={!csvFile || loading}
+                onClick={() => processCsvFiles(csvFiles)}
+                disabled={csvFiles.length === 0 || loading}
                 className="w-full"
               >
-                {loading ? "解析中..." : "CSV を解析する"}
+                {loading && progress?.kind === "csv"
+                  ? `${progress.current}/${progress.total} 件を読み込み中...`
+                  : `選択したCSVを解析する（${csvFiles.length}件）`}
               </Button>
             </div>
           )}
@@ -245,114 +495,211 @@ export default function ImportPage() {
           {tab === "image" && (
             <div className="space-y-4">
               <p className="text-sm text-gray-500">
-                クレジットカードや銀行の利用明細画像をアップロードすると、AI が OCR で取引を抽出します。
-                スマホではカメラで直接撮影できます。
+                複数の利用明細画像をまとめて選択できます。1枚ずつ順に解析し、失敗した画像以外の結果は保持されます。
+                スマホではカメラ撮影にも対応します。
               </p>
-              <label className="flex min-h-[140px] cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-gray-300 p-6 transition-colors hover:border-indigo-400 hover:bg-indigo-50/30 sm:p-10">
+              <label
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver("image");
+                }}
+                onDragLeave={() => setDragOver(null)}
+                onDrop={(e) => onDropFiles(e, "image")}
+                className={`flex min-h-[140px] cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-6 transition-colors sm:p-10 ${
+                  dragOver === "image"
+                    ? "border-indigo-400 bg-indigo-50/50"
+                    : "border-gray-300 hover:border-indigo-400 hover:bg-indigo-50/30"
+                }`}
+              >
                 <Camera className="h-8 w-8 text-gray-400" />
                 <span className="px-2 text-center text-sm text-gray-500">
-                  {imageFile
-                    ? imageFile.name
-                    : "撮影または JPEG / PNG 画像を選択"}
+                  {imageFiles.length > 0
+                    ? `${imageFiles.length}枚の画像を選択中`
+                    : "画像を複数選択、撮影、またはここにドロップ"}
                 </span>
                 <input
                   type="file"
                   accept="image/*"
+                  multiple
                   capture="environment"
                   className="hidden"
-                  onChange={(e) => setImageFile(e.target.files?.[0] ?? null)}
+                  onChange={(e) => {
+                    setImageFiles(collectFiles(e.target.files, isImageFile));
+                    e.target.value = "";
+                  }}
                 />
               </label>
+              {imageFiles.length > 0 && (
+                <ul className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-gray-100 bg-gray-50 p-3 text-sm text-gray-700">
+                  {imageFiles.map((f) => (
+                    <li key={`${f.name}-${f.size}-${f.lastModified}`} className="flex items-center justify-between gap-2">
+                      <span className="truncate">{f.name}</span>
+                      <button
+                        type="button"
+                        className="flex-shrink-0 text-gray-400 hover:text-gray-600"
+                        onClick={() =>
+                          setImageFiles((prev) => prev.filter((x) => x !== f))
+                        }
+                        aria-label={`${f.name} を除外`}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <Button
-                onClick={handleImageUpload}
-                disabled={!imageFile || loading}
+                onClick={() => processImageFiles(imageFiles)}
+                disabled={imageFiles.length === 0 || loading}
                 className="w-full"
               >
-                {loading ? "画像を解析中..." : "画像から取引を抽出する"}
+                {loading && progress?.kind === "image"
+                  ? `${progress.total}枚中${progress.current}枚を解析中...`
+                  : `選択した画像を解析する（${imageFiles.length}枚）`}
               </Button>
             </div>
           )}
         </CardContent>
       </Card>
 
-      {parsed && parsed.length > 0 && (
+      {parsed.length > 0 && (
         <Card>
           <CardHeader>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <CardTitle>
-                取り込み内容の確認（{parsed.length}件）
+                確認・分類（合計 {parsed.length}件）
               </CardTitle>
               <div className="flex flex-col gap-2 sm:flex-row">
-                <Button variant="outline" className="w-full sm:w-auto" onClick={() => setParsed(null)}>
-                  キャンセル
+                <Button
+                  variant="outline"
+                  className="w-full sm:w-auto"
+                  onClick={() => {
+                    setParsed([]);
+                    setFailures([]);
+                    setPage(1);
+                  }}
+                  disabled={saving || loading}
+                >
+                  クリア
                 </Button>
-                <Button className="w-full sm:w-auto" onClick={confirmAndSave} disabled={saving}>
-                  {saving ? "保存中..." : `${parsed.length}件を保存する`}
+                <Button
+                  className="w-full sm:w-auto"
+                  onClick={confirmAndSave}
+                  disabled={saving || loading}
+                >
+                  {saving
+                    ? "保存中..."
+                    : `全て確定してDBに保存（${parsed.length}件）`}
                 </Button>
               </div>
             </div>
             <p className="mt-1 text-sm text-gray-500">
-              内容を確認してから「保存する」を押してください。AI が自動的にカテゴリを分類します。
+              CSV・画像・手入力の明細をまとめて確認できます。保存時にAIがカテゴリを自動分類します。不要な行は削除してください。
             </p>
           </CardHeader>
-          <CardContent>
-            {/* PC: テーブル */}
-            <div className="hidden md:block">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 text-left text-gray-500">
-                    <th className="pb-3 pr-4 font-medium">日付</th>
-                    <th className="pb-3 pr-4 font-medium">利用先</th>
-                    <th className="pb-3 pr-4 font-medium">金額</th>
-                    <th className="pb-3 font-medium">削除</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {parsed.map((tx, i) => (
-                    <tr key={i} className="hover:bg-gray-50">
-                      <td className="py-3 pr-4 text-gray-600">{formatDate(tx.date)}</td>
-                      <td className="py-3 pr-4 font-medium">{tx.description}</td>
-                      <td className="py-3 pr-4 text-right">{formatCurrency(tx.amount)}</td>
-                      <td className="py-3">
-                        <button
-                          onClick={() => removeItem(i)}
-                          className="text-xs text-red-400 hover:text-red-600"
-                        >
-                          削除
-                        </button>
-                      </td>
+          <CardContent className="space-y-4">
+            <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-gray-100">
+              {/* PC: テーブル */}
+              <div className="hidden md:block">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-white">
+                    <tr className="border-b border-gray-200 text-left text-gray-500">
+                      <th className="px-4 py-3 font-medium">日付</th>
+                      <th className="px-4 py-3 font-medium">利用先</th>
+                      <th className="px-4 py-3 font-medium">金額</th>
+                      <th className="px-4 py-3 font-medium">ソース</th>
+                      <th className="px-4 py-3 font-medium">削除</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {pagedItems.map(({ tx, index }) => (
+                      <tr key={`${tx.date}-${tx.description}-${index}`} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-gray-600">{formatDate(tx.date)}</td>
+                        <td className="px-4 py-3 font-medium">{tx.description}</td>
+                        <td className="px-4 py-3 text-right">{formatCurrency(tx.amount)}</td>
+                        <td className="px-4 py-3">
+                          <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                            {tx.source === "CSV"
+                              ? "CSV"
+                              : tx.source === "IMAGE"
+                                ? "画像"
+                                : "手入力"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => removeItem(index)}
+                            className="text-xs text-red-400 hover:text-red-600"
+                          >
+                            削除
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* スマホ: カード */}
+              <div className="space-y-3 p-3 md:hidden">
+                {pagedItems.map(({ tx, index }) => (
+                  <div
+                    key={`${tx.date}-${tx.description}-${index}`}
+                    className="rounded-xl border border-gray-200 p-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs text-gray-500">{formatDate(tx.date)}</p>
+                        <p className="mt-1 truncate font-medium text-gray-900">
+                          {tx.description}
+                        </p>
+                        <span className="mt-2 inline-block rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                          {tx.source === "CSV"
+                            ? "CSV"
+                            : tx.source === "IMAGE"
+                              ? "画像"
+                              : "手入力"}
+                        </span>
+                      </div>
+                      <p className="flex-shrink-0 font-bold">{formatCurrency(tx.amount)}</p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      className="mt-3 w-full text-red-500"
+                      onClick={() => removeItem(index)}
+                    >
+                      削除
+                    </Button>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            {/* スマホ: カード */}
-            <div className="space-y-3 md:hidden">
-              {parsed.map((tx, i) => (
-                <div
-                  key={i}
-                  className="rounded-xl border border-gray-200 p-4"
+            {parsed.length > PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-3">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  aria-label="前のページ"
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs text-gray-500">{formatDate(tx.date)}</p>
-                      <p className="mt-1 truncate font-medium text-gray-900">
-                        {tx.description}
-                      </p>
-                    </div>
-                    <p className="flex-shrink-0 font-bold">{formatCurrency(tx.amount)}</p>
-                  </div>
-                  <Button
-                    variant="outline"
-                    className="mt-3 w-full text-red-500"
-                    onClick={() => removeItem(i)}
-                  >
-                    削除
-                  </Button>
-                </div>
-              ))}
-            </div>
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <span className="text-sm text-gray-600">
+                  {page} / {totalPages} ページ（{PAGE_SIZE}件ずつ）
+                </span>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  disabled={page >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  aria-label="次のページ"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
