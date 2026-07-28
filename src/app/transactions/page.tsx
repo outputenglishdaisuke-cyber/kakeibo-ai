@@ -1,11 +1,26 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import {
+  Suspense,
+  useEffect,
+  useState,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CategorySelect } from "@/components/ui/category-select";
 import { formatCurrency, formatDate, getMonthKey } from "@/lib/utils";
 import type { Transaction, Category } from "@/types";
+import {
+  buildFilterSearchParams,
+  parseFiltersFromSearchParams,
+  sameStringArray,
+  UNCATEGORIZED_KEY,
+  type SourceFilter,
+} from "@/lib/transactions-filters";
 import {
   Trash2,
   Check,
@@ -16,15 +31,11 @@ import {
   RotateCcw,
 } from "lucide-react";
 
-type SourceFilter = Transaction["source"];
-
 const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
   { value: "CSV", label: "CSV" },
   { value: "IMAGE", label: "画像" },
   { value: "MANUAL", label: "手入力" },
 ];
-
-const UNCATEGORIZED_KEY = "uncategorized";
 
 function sourceLabel(source: Transaction["source"]) {
   if (source === "CSV") return "CSV";
@@ -37,90 +48,29 @@ function displayMonthLabel(monthKey: string) {
   return `${y}年${parseInt(m, 10)}月`;
 }
 
-function parseCategoriesFromUrl(raw: string | null): string[] {
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function parseSourcesFromUrl(raw: string | null): SourceFilter[] {
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s): s is SourceFilter =>
-      s === "CSV" || s === "IMAGE" || s === "MANUAL"
-    );
-}
-
-function readFiltersFromUrl(): {
-  month: string;
-  categoryKeys: string[];
-  sources: SourceFilter[];
-} {
-  if (typeof window === "undefined") {
-    return {
-      month: getMonthKey(new Date()),
-      categoryKeys: [],
-      sources: [],
-    };
-  }
-  const params = new URLSearchParams(window.location.search);
-  let categoryKeys = parseCategoriesFromUrl(params.get("categories"));
-  // 互換: ?category=食費 または ?category=<id>
-  const single = params.get("category");
-  if (single && categoryKeys.length === 0) {
-    const trimmed = single.trim();
-    if (
-      trimmed === "未分類" ||
-      trimmed === "null" ||
-      trimmed === "uncategorized"
-    ) {
-      categoryKeys = [UNCATEGORIZED_KEY];
-    } else {
-      categoryKeys = [trimmed];
-    }
-  }
-  return {
-    month: params.get("month") || getMonthKey(new Date()),
-    categoryKeys,
-    sources: parseSourcesFromUrl(params.get("sources")),
-  };
-}
-
-function writeFiltersToUrl(
-  month: string,
-  categoryKeys: string[],
-  sources: SourceFilter[]
-) {
-  const params = new URLSearchParams();
-  params.set("month", month);
-  if (categoryKeys.length > 0) {
-    params.set("categories", categoryKeys.join(","));
-  }
-  if (sources.length > 0) {
-    params.set("sources", sources.join(","));
-  }
-  const qs = params.toString();
-  const next = qs ? `/transactions?${qs}` : "/transactions";
-  window.history.replaceState(null, "", next);
-}
-
 type ConfirmState =
   | { type: "selected"; count: number; ids: string[] }
   | { type: "month"; month: string; count: number }
   | { type: "all"; count: number };
 
-export default function TransactionsPage() {
-  const initial = useRef(readFiltersFromUrl());
-  const [currentMonth, setCurrentMonth] = useState(initial.current.month);
+function TransactionsPageInner() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // searchParams オブジェクトの参照揺れを避けるためクエリ文字列でメモ化
+  const searchQs = searchParams.toString();
+  const urlFilters = useMemo(
+    () => parseFiltersFromSearchParams(new URLSearchParams(searchQs)),
+    [searchQs]
+  );
+
+  const [currentMonth, setCurrentMonth] = useState(urlFilters.month);
   const [selectedCategoryKeys, setSelectedCategoryKeys] = useState<string[]>(
-    initial.current.categoryKeys
+    () => urlFilters.categoryKeys
   );
   const [selectedSources, setSelectedSources] = useState<SourceFilter[]>(
-    initial.current.sources
+    () => urlFilters.sources
   );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -136,39 +86,61 @@ export default function TransactionsPage() {
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmState | null>(null);
   const [deleting, setDeleting] = useState(false);
+  /** URL→state 反映中は state→URL 書き戻しを抑止 */
+  const applyingFromUrl = useRef(false);
 
   const hasActiveFilters =
     selectedCategoryKeys.length > 0 || selectedSources.length > 0;
 
-  const fetchAll = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!opts?.silent) setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      params.set("month", currentMonth);
-      if (selectedCategoryKeys.length > 0) {
-        params.set("categories", selectedCategoryKeys.join(","));
-      }
-      if (selectedSources.length > 0) {
-        params.set("sources", selectedSources.join(","));
-      }
-
-      const [txRes, catRes] = await Promise.all([
-        fetch(`/api/transactions?${params.toString()}`),
-        fetch("/api/categories"),
-      ]);
-      if (txRes.ok) setTransactions(await txRes.json());
-      if (catRes.ok) setCategories(await catRes.json());
-      if (!opts?.silent) setSelectedIds(new Set());
-    } finally {
-      if (!opts?.silent) setLoading(false);
-    }
-  }, [currentMonth, selectedCategoryKeys, selectedSources]);
-
+  // ダッシュボード等からの遷移・直リンク時: URL をソース・オブ・トゥルースにする
   useEffect(() => {
-    writeFiltersToUrl(currentMonth, selectedCategoryKeys, selectedSources);
-  }, [currentMonth, selectedCategoryKeys, selectedSources]);
+    applyingFromUrl.current = true;
+    setCurrentMonth(urlFilters.month);
+    setSelectedCategoryKeys(urlFilters.categoryKeys);
+    setSelectedSources(urlFilters.sources);
+    const t = setTimeout(() => {
+      applyingFromUrl.current = false;
+    }, 0);
+    return () => clearTimeout(t);
+  }, [urlFilters]);
 
-  // URL の category=名前 を ID に解決
+  const replaceFilterUrl = useCallback(
+    (month: string, categoryKeys: string[], sources: SourceFilter[]) => {
+      const qs = buildFilterSearchParams(month, categoryKeys, sources);
+      const next = qs ? `${pathname}?${qs}` : pathname;
+      router.replace(next, { scroll: false });
+    },
+    [pathname, router]
+  );
+
+  // ユーザー操作による state 変更を URL に反映
+  useEffect(() => {
+    if (applyingFromUrl.current) return;
+    const qs = buildFilterSearchParams(
+      currentMonth,
+      selectedCategoryKeys,
+      selectedSources
+    );
+    const nextParsed = parseFiltersFromSearchParams(new URLSearchParams(qs));
+    const curParsed = parseFiltersFromSearchParams(searchParams);
+    if (
+      nextParsed.month === curParsed.month &&
+      sameStringArray(nextParsed.categoryKeys, curParsed.categoryKeys) &&
+      sameStringArray(nextParsed.sources, curParsed.sources)
+    ) {
+      return;
+    }
+    if (qs === searchParams.toString()) return;
+    replaceFilterUrl(currentMonth, selectedCategoryKeys, selectedSources);
+  }, [
+    currentMonth,
+    selectedCategoryKeys,
+    selectedSources,
+    replaceFilterUrl,
+    searchParams,
+  ]);
+
+  // カテゴリ名 → ID 解決（?category=食費）
   useEffect(() => {
     if (categories.length === 0) return;
     setSelectedCategoryKeys((prev) => {
@@ -186,6 +158,39 @@ export default function TransactionsPage() {
       return changed ? next : prev;
     });
   }, [categories]);
+
+  const categoryKeysForApi = useMemo(() => {
+    if (categories.length === 0) return selectedCategoryKeys;
+    return selectedCategoryKeys.map((k) => {
+      if (k === UNCATEGORIZED_KEY) return k;
+      if (categories.some((c) => c.id === k)) return k;
+      return categories.find((c) => c.name === k)?.id ?? k;
+    });
+  }, [selectedCategoryKeys, categories]);
+
+  const fetchAll = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("month", currentMonth);
+      if (categoryKeysForApi.length > 0) {
+        params.set("categories", categoryKeysForApi.join(","));
+      }
+      if (selectedSources.length > 0) {
+        params.set("sources", selectedSources.join(","));
+      }
+
+      const [txRes, catRes] = await Promise.all([
+        fetch(`/api/transactions?${params.toString()}`),
+        fetch("/api/categories"),
+      ]);
+      if (txRes.ok) setTransactions(await txRes.json());
+      if (catRes.ok) setCategories(await catRes.json());
+      if (!opts?.silent) setSelectedIds(new Set());
+    } finally {
+      if (!opts?.silent) setLoading(false);
+    }
+  }, [currentMonth, categoryKeysForApi, selectedSources]);
 
   useEffect(() => {
     fetchAll();
@@ -820,5 +825,20 @@ export default function TransactionsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+
+export default function TransactionsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-64 items-center justify-center text-gray-400">
+          読み込み中...
+        </div>
+      }
+    >
+      <TransactionsPageInner />
+    </Suspense>
   );
 }
