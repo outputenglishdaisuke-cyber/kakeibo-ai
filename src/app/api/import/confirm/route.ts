@@ -6,7 +6,7 @@ import { z } from "zod";
 const transactionSchema = z.object({
   date: z.string(),
   description: z.string(),
-  amount: z.number().int().positive(),
+  amount: z.number().int().refine((n) => n !== 0, { message: "amount must be non-zero" }),
   source: z.enum(["CSV", "MANUAL", "IMAGE"]).default("CSV"),
 });
 

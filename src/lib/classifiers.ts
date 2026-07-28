@@ -1,41 +1,140 @@
 import { anthropic, MODEL } from "@/lib/anthropic";
-import type { Category, ClassificationResult, ParsedTransaction } from "@/types";
+import type {
+  Category,
+  ClassificationResult,
+  CsvStructureAnalysis,
+} from "@/types";
 
 /**
- * CSV のヘッダーとサンプル行から、日付・利用先・金額に対応する列名を AI に推定させる。
+ * CSV 先頭サンプルから構造を Claude に解析させる。
+ * 決め打ちのパターンマッチではなく、AI による構造理解を中心にする。
  */
-export async function inferCsvColumnMapping(
+export async function analyzeCsvStructure(
   csvSample: string
-): Promise<{ date: string; description: string; amount: string }> {
+): Promise<CsvStructureAnalysis> {
   const message = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 256,
+    max_tokens: 1024,
     messages: [
       {
         role: "user",
-        content: `以下はクレジットカード利用明細 CSV のヘッダー（または合成列名）と最初の数行です。
-日付・利用先(店舗名)・金額(円)に相当する列名をそれぞれ特定し、JSON 形式で返してください。
-ヘッダーなしCSVの場合は「列1」「列2」などの合成列名が付与されています。
-金額列が複数ある場合は利用金額（請求金額）として最も適切な列を選んでください。
+        content: `あなたはクレジットカード・銀行の利用明細 CSV の構造解析アシスタントです。
+以下はアップロードされたファイルの先頭数行です（row[n] は 0 始まりの行番号、各要素は列の値です）。
+
+このサンプルだけを見て、ファイル構造を判定し、指定の JSON のみを返してください。
+
+【必ず判定すること】
+1. 本当にCSV形式の利用明細データか（氏名・カード番号だけの情報行が混ざっていないか）
+2. ヘッダー行があるか。ある場合その行番号（0始まり）
+3. 実際のデータ行が何行目から始まるか（dataStartRow, 0始まり）
+4. 各列インデックス（0始まり）が「日付」「店名・利用先」「金額」「その他」のどれか
+   - dateColumnIndex / storeColumnIndex / amountColumnIndex を特定する
+   - 金額列が複数ある場合は「利用金額・請求金額」として最も適切な1列を選ぶ（回数や支払回数の列は選ばない）
+5. 日付フォーマット（例: YYYY/MM/DD, YYYY/M/D, 全角数字の有無）
+6. 金額フォーマット（半角/全角、カンマ、マイナス・返品の表現）
+7. データではない行（情報行など）があれば skipRowIndices に列挙する
+8. 構造に自信が持てない場合は unrecognized: true, confidence: "low" とし、無理に列を当てない
+
+【出力JSONスキーマ】（これ以外の文字は出力しない）
+{
+  "isCsv": true,
+  "confidence": "high" | "medium" | "low",
+  "unrecognized": false,
+  "hasHeader": false,
+  "headerRowIndex": null,
+  "dataStartRow": 0,
+  "dateColumnIndex": 0,
+  "storeColumnIndex": 1,
+  "amountColumnIndex": 2,
+  "dateFormat": "YYYY/M/D",
+  "amountFormat": "半角数字。マイナスは先頭に-。全角数字の場合あり",
+  "skipRowIndices": [],
+  "notes": "短い日本語の補足"
+}
+
+構造を認識できない場合の例:
+{
+  "isCsv": false,
+  "confidence": "low",
+  "unrecognized": true,
+  "hasHeader": false,
+  "headerRowIndex": null,
+  "dataStartRow": 0,
+  "dateColumnIndex": -1,
+  "storeColumnIndex": -1,
+  "amountColumnIndex": -1,
+  "dateFormat": "",
+  "amountFormat": "",
+  "skipRowIndices": [],
+  "notes": "理由"
+}
 
 CSV サンプル:
 \`\`\`
 ${csvSample}
-\`\`\`
-
-レスポンスは以下の JSON のみを返してください（説明文不要）:
-{"date": "<列名>", "description": "<列名>", "amount": "<列名>"}`,
+\`\`\``,
       },
     ],
   });
 
   const text =
     message.content[0].type === "text" ? message.content[0].text : "";
-  const jsonMatch = text.match(/\{[^}]+\}/);
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
-    throw new Error("AI が列マッピングを返しませんでした: " + text);
+    return {
+      isCsv: false,
+      confidence: "low",
+      unrecognized: true,
+      hasHeader: false,
+      headerRowIndex: null,
+      dataStartRow: 0,
+      dateColumnIndex: -1,
+      storeColumnIndex: -1,
+      amountColumnIndex: -1,
+      dateFormat: "",
+      amountFormat: "",
+      skipRowIndices: [],
+      notes: "AI が構造JSONを返しませんでした",
+    };
   }
-  return JSON.parse(jsonMatch[0]);
+
+  const parsed = JSON.parse(jsonMatch[0]) as Partial<CsvStructureAnalysis>;
+
+  const confidence =
+    parsed.confidence === "high" ||
+    parsed.confidence === "medium" ||
+    parsed.confidence === "low"
+      ? parsed.confidence
+      : "low";
+
+  return {
+    isCsv: Boolean(parsed.isCsv),
+    confidence,
+    unrecognized: Boolean(parsed.unrecognized) || confidence === "low",
+    hasHeader: Boolean(parsed.hasHeader),
+    headerRowIndex:
+      typeof parsed.headerRowIndex === "number" ? parsed.headerRowIndex : null,
+    dataStartRow:
+      typeof parsed.dataStartRow === "number" && parsed.dataStartRow >= 0
+        ? parsed.dataStartRow
+        : 0,
+    dateColumnIndex:
+      typeof parsed.dateColumnIndex === "number" ? parsed.dateColumnIndex : -1,
+    storeColumnIndex:
+      typeof parsed.storeColumnIndex === "number"
+        ? parsed.storeColumnIndex
+        : -1,
+    amountColumnIndex:
+      typeof parsed.amountColumnIndex === "number"
+        ? parsed.amountColumnIndex
+        : -1,
+    dateFormat: String(parsed.dateFormat ?? ""),
+    amountFormat: String(parsed.amountFormat ?? ""),
+    skipRowIndices: Array.isArray(parsed.skipRowIndices)
+      ? parsed.skipRowIndices.filter((n): n is number => typeof n === "number")
+      : [],
+    notes: String(parsed.notes ?? ""),
+  };
 }
 
 /**

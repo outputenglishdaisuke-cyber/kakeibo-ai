@@ -38,10 +38,33 @@ export interface CsvRow {
   [key: string]: string;
 }
 
+/** @deprecated 列名ベースの旧マッピング。AI構造解析結果を優先する */
 export interface CsvColumnMapping {
   date: string;
   description: string;
   amount: string;
+}
+
+/**
+ * Claude API による CSV 構造解析結果。
+ * 列インデックスは 0 始まり。
+ */
+export interface CsvStructureAnalysis {
+  isCsv: boolean;
+  confidence: "high" | "medium" | "low";
+  hasHeader: boolean;
+  headerRowIndex: number | null;
+  dataStartRow: number;
+  dateColumnIndex: number;
+  storeColumnIndex: number;
+  amountColumnIndex: number;
+  dateFormat: string;
+  amountFormat: string;
+  /** データ行ではないと判断した行（0始まり）。任意 */
+  skipRowIndices: number[];
+  notes: string;
+  /** true の場合はユーザーへ認識失敗を返す */
+  unrecognized: boolean;
 }
 
 export interface ParsedTransaction {

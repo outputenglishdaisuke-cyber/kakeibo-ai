@@ -1,3 +1,4 @@
+import Encoding from "encoding-japanese";
 import iconv from "iconv-lite";
 
 export class CsvEncodingError extends Error {
@@ -7,75 +8,97 @@ export class CsvEncodingError extends Error {
   }
 }
 
-function isValidUtf8(buf: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buf);
-    return true;
-  } catch {
-    return false;
+export type DetectedEncoding =
+  | "UTF8"
+  | "UTF8BOM"
+  | "SJIS"
+  | "EUCJP"
+  | "UTF16"
+  | "ASCII"
+  | "BINARY"
+  | "UNKNOWN";
+
+const ENCODING_TO_ICONV: Record<string, string> = {
+  UTF8: "utf-8",
+  UTF8BOM: "utf-8",
+  SJIS: "CP932",
+  EUCJP: "EUC-JP",
+  UTF16: "utf-16le",
+  ASCII: "utf-8",
+};
+
+function stripBom(text: string): string {
+  return text.replace(/^\uFEFF/, "");
+}
+
+function toUint8Array(input: ArrayBuffer | Buffer | Uint8Array): Uint8Array {
+  if (Buffer.isBuffer(input) || input instanceof Uint8Array) {
+    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
   }
-}
-
-function countJapaneseChars(text: string): number {
-  const matches = text.match(/[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9d]/g);
-  return matches?.length ?? 0;
-}
-
-function hasReplacementChar(text: string): boolean {
-  return text.includes("\uFFFD");
+  return new Uint8Array(input);
 }
 
 /**
  * CSV バイナリを UTF-8 文字列に変換する。
- * UTF-8 が有効ならそのまま、無効または日本語が少ない場合は CP932 / Shift_JIS を試す。
+ * encoding-japanese で判定し、iconv-lite でデコードする。
  */
-export function decodeCsvBuffer(input: ArrayBuffer | Buffer | Uint8Array): string {
-  const buf = Buffer.isBuffer(input)
-    ? input
-    : Buffer.from(input instanceof ArrayBuffer ? new Uint8Array(input) : input);
-
-  if (buf.length === 0) {
+export function decodeCsvBuffer(input: ArrayBuffer | Buffer | Uint8Array): {
+  text: string;
+  encoding: DetectedEncoding;
+} {
+  const bytes = toUint8Array(input);
+  if (bytes.length === 0) {
     throw new CsvEncodingError("文字コードを認識できませんでした（空ファイルです）");
   }
 
-  const candidates: { label: string; text: string }[] = [];
-
-  if (isValidUtf8(buf)) {
-    candidates.push({ label: "utf-8", text: buf.toString("utf8") });
+  // UTF-8 BOM
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    const text = stripBom(Buffer.from(bytes).toString("utf8"));
+    if (!text.trim()) {
+      throw new CsvEncodingError("文字コードを認識できませんでした");
+    }
+    return { text, encoding: "UTF8BOM" };
   }
 
-  for (const encoding of ["CP932", "Shift_JIS"] as const) {
-    try {
-      const text = iconv.decode(buf, encoding);
-      if (!hasReplacementChar(text)) {
-        candidates.push({ label: encoding, text });
-      }
-    } catch {
-      // try next encoding
+  const detected = (Encoding.detect(bytes) ?? "UNKNOWN") as DetectedEncoding;
+  const iconvName = ENCODING_TO_ICONV[detected];
+
+  // 判定結果でデコードを試みる
+  const attempts: { encoding: DetectedEncoding; iconvName: string }[] = [];
+  if (iconvName) {
+    attempts.push({ encoding: detected, iconvName });
+  }
+  // フォールバック順（カード会社CSVは SJIS/CP932 が多い）
+  for (const fallback of [
+    { encoding: "SJIS" as const, iconvName: "CP932" },
+    { encoding: "UTF8" as const, iconvName: "utf-8" },
+    { encoding: "EUCJP" as const, iconvName: "EUC-JP" },
+    { encoding: "SJIS" as const, iconvName: "Shift_JIS" },
+  ]) {
+    if (!attempts.some((a) => a.iconvName === fallback.iconvName)) {
+      attempts.push(fallback);
     }
   }
 
-  if (candidates.length === 0) {
+  let best: { text: string; encoding: DetectedEncoding; score: number } | null = null;
+
+  for (const attempt of attempts) {
+    try {
+      const decoded = stripBom(iconv.decode(Buffer.from(bytes), attempt.iconvName));
+      if (!decoded.trim() || decoded.includes("\uFFFD")) continue;
+      const ja = (decoded.match(/[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9d]/g) ?? []).length;
+      const score = ja * 10 + decoded.length;
+      if (!best || score > best.score) {
+        best = { text: decoded, encoding: attempt.encoding, score };
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  if (!best) {
     throw new CsvEncodingError("文字コードを認識できませんでした");
   }
 
-  // 日本語文字が多く、置換文字がない候補を優先
-  candidates.sort((a, b) => {
-    const ja = countJapaneseChars(b.text) - countJapaneseChars(a.text);
-    if (ja !== 0) return ja;
-    // 同点なら UTF-8 を優先
-    if (a.label === "utf-8") return -1;
-    if (b.label === "utf-8") return 1;
-    // CP932 を Shift_JIS より優先（Windows 系カード明細向け）
-    if (a.label === "CP932") return -1;
-    if (b.label === "CP932") return 1;
-    return 0;
-  });
-
-  const best = candidates[0];
-  if (!best.text.trim()) {
-    throw new CsvEncodingError("文字コードを認識できませんでした");
-  }
-
-  return best.text;
+  return { text: best.text, encoding: best.encoding };
 }

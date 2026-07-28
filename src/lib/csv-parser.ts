@@ -1,115 +1,157 @@
 import Papa from "papaparse";
-import type { CsvRow, ParsedTransaction, CsvColumnMapping } from "@/types";
-
-const DATE_LIKE =
-  /^\d{4}[\/\-年]\d{1,2}[\/\-月]\d{1,2}/;
+import type { CsvStructureAnalysis, ParsedTransaction } from "@/types";
 
 /**
- * 先頭行がヘッダーではなくデータ行かどうかを判定する。
- * カード会社明細（日付が1列目から始まる）などヘッダーなし CSV 向け。
+ * CSV テキストを行×列の二次元配列にパースする（ヘッダー判定なし）。
+ * 空行はスキップする。
  */
-function looksLikeDataRow(firstCells: string[]): boolean {
-  const first = (firstCells[0] ?? "").trim();
-  if (!first) return false;
-  return DATE_LIKE.test(first);
-}
-
-/**
- * CSV 文字列をパースして行の配列を返す。
- * ヘッダーなしの場合は「列1」「列2」… の合成ヘッダーを付与する。
- */
-export function parseCsvString(csvText: string): {
-  headers: string[];
-  rows: CsvRow[];
-  hasHeader: boolean;
-} {
-  const preview = Papa.parse<string[]>(csvText, {
-    header: false,
-    skipEmptyLines: true,
-    preview: 1,
-  });
-  const firstRow = preview.data[0] ?? [];
-  const hasHeader = firstRow.length > 0 && !looksLikeDataRow(firstRow);
-
-  if (hasHeader) {
-    const result = Papa.parse<CsvRow>(csvText, {
-      header: true,
-      skipEmptyLines: true,
-      transformHeader: (h) => h.trim(),
-    });
-    const headers = (result.meta.fields ?? []).map((h) => h.trim()).filter(Boolean);
-    return { headers, rows: result.data, hasHeader: true };
-  }
-
-  // ヘッダーなし: 全行を配列として読み、合成ヘッダーでオブジェクト化
+export function parseCsvToMatrix(csvText: string): string[][] {
   const result = Papa.parse<string[]>(csvText, {
     header: false,
     skipEmptyLines: true,
   });
-  const maxCols = result.data.reduce((m, row) => Math.max(m, row.length), 0);
-  const headers = Array.from({ length: maxCols }, (_, i) => `列${i + 1}`);
-  const rows: CsvRow[] = result.data.map((cells) => {
-    const row: CsvRow = {};
-    headers.forEach((h, i) => {
-      row[h] = (cells[i] ?? "").trim();
-    });
-    return row;
-  });
-
-  return { headers, rows, hasHeader: false };
+  return result.data.map((row) => row.map((cell) => (cell ?? "").trim()));
 }
 
 /**
- * カラムマッピングを使って CsvRow[] → ParsedTransaction[] に変換する。
- * 金額はカンマ・円記号・スペースを除去してから数値化。
- * 入力がマイナスの場合は絶対値を使用（支出として扱う）。
+ * Claude に渡す先頭サンプル（行番号付き）。
  */
-export function mapRowsToTransactions(
-  rows: CsvRow[],
-  mapping: CsvColumnMapping
+export function buildCsvSampleForAi(matrix: string[][], maxRows = 15): string {
+  const lines = matrix.slice(0, maxRows).map((row, i) => {
+    const cells = row.map((c) => JSON.stringify(c)).join(", ");
+    return `row[${i}]: [${cells}]`;
+  });
+  return [
+    `総サンプル行数: ${Math.min(matrix.length, maxRows)} / 全体行数: ${matrix.length}`,
+    `最大列数: ${matrix.reduce((m, r) => Math.max(m, r.length), 0)}`,
+    "",
+    ...lines,
+  ].join("\n");
+}
+
+const FULLWIDTH_DIGIT_MAP: Record<string, string> = {
+  "０": "0",
+  "１": "1",
+  "２": "2",
+  "３": "3",
+  "４": "4",
+  "５": "5",
+  "６": "6",
+  "７": "7",
+  "８": "8",
+  "９": "9",
+};
+
+/** 全角英数字・記号を半角に寄せる */
+export function toHalfWidth(text: string): string {
+  return text
+    .replace(/[０-９]/g, (ch) => FULLWIDTH_DIGIT_MAP[ch] ?? ch)
+    .replace(/[Ａ-Ｚａ-ｚ]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) - 0xfee0)
+    )
+    .replace(/　/g, " ")
+    .replace(/[−－]/g, "-")
+    .replace(/￥/g, "¥");
+}
+
+/**
+ * 金額文字列を整数に変換する。
+ * 全角数字・カンマ・円記号を除去し、マイナス（返品）は符号を保持する。
+ */
+export function parseAmount(raw: string): number | null {
+  if (!raw?.trim()) return null;
+  let s = toHalfWidth(raw.trim());
+  s = s.replace(/[¥￥円,\s]/g, "");
+  // 末尾の ▲ や (123) 形式
+  let negative = false;
+  if (/^\(.*\)$/.test(s)) {
+    negative = true;
+    s = s.slice(1, -1);
+  }
+  if (s.startsWith("-") || s.startsWith("▲") || s.startsWith("△")) {
+    negative = true;
+    s = s.replace(/^[-▲△]+/, "");
+  }
+  if (!s || !/^\d+(\.\d+)?$/.test(s)) return null;
+  const value = Math.round(parseFloat(s));
+  if (isNaN(value) || value === 0) return null;
+  return negative ? -value : value;
+}
+
+/**
+ * 日付文字列を YYYY-MM-DD に正規化する。失敗時は null。
+ */
+export function normalizeDate(raw: string, _dateFormatHint?: string): string | null {
+  if (!raw?.trim()) return null;
+  let s = toHalfWidth(raw.trim());
+  s = s.replace(/年|月/g, "/").replace(/日/g, "");
+
+  // YYYY/M/D or YYYY-M-D
+  let m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+  if (m) {
+    const y = m[1];
+    const mo = m[2].padStart(2, "0");
+    const d = m[3].padStart(2, "0");
+    return `${y}-${mo}-${d}`;
+  }
+
+  // YY/M/D
+  m = s.match(/^(\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+  if (m) {
+    const yy = parseInt(m[1], 10);
+    const y = yy >= 70 ? `19${m[1]}` : `20${m[1]}`;
+    const mo = m[2].padStart(2, "0");
+    const d = m[3].padStart(2, "0");
+    return `${y}-${mo}-${d}`;
+  }
+
+  return null;
+}
+
+/**
+ * AI の構造解析結果をもとに、全行を取引リストへ変換する。
+ */
+export function mapMatrixToTransactions(
+  matrix: string[][],
+  structure: CsvStructureAnalysis
 ): ParsedTransaction[] {
+  const {
+    dataStartRow,
+    dateColumnIndex,
+    storeColumnIndex,
+    amountColumnIndex,
+    dateFormat,
+    skipRowIndices,
+  } = structure;
+
+  const skip = new Set(skipRowIndices ?? []);
   const transactions: ParsedTransaction[] = [];
 
-  for (const row of rows) {
-    const rawDate = row[mapping.date]?.trim();
-    const rawDesc = row[mapping.description]?.trim();
-    const rawAmount = row[mapping.amount]?.trim();
+  for (let i = dataStartRow; i < matrix.length; i++) {
+    if (skip.has(i)) continue;
+    // ヘッダー行はデータに含めない
+    if (structure.hasHeader && structure.headerRowIndex === i) continue;
 
-    if (!rawDate || !rawDesc || !rawAmount) continue;
+    const row = matrix[i];
+    if (!row || row.every((c) => !c)) continue;
 
-    const cleanedAmount = rawAmount.replace(/[¥,\s円]/g, "");
-    const amount = Math.abs(parseFloat(cleanedAmount));
+    const rawDate = row[dateColumnIndex] ?? "";
+    const rawStore = row[storeColumnIndex] ?? "";
+    const rawAmount = row[amountColumnIndex] ?? "";
 
-    if (isNaN(amount) || amount === 0) continue;
+    const date = normalizeDate(rawDate, dateFormat);
+    const description = toHalfWidth(rawStore).trim();
+    const amount = parseAmount(rawAmount);
+
+    if (!date || !description || amount === null) continue;
 
     transactions.push({
-      date: rawDate,
-      description: rawDesc,
-      amount: Math.round(amount),
+      date,
+      description,
+      amount,
       source: "CSV",
     });
   }
 
   return transactions;
-}
-
-/**
- * CSV の最初の数行サンプルを文字列として返す（AI プロンプト用）。
- */
-export function getCsvSample(
-  headers: string[],
-  rows: CsvRow[],
-  sampleCount = 3,
-  hasHeader = true
-): string {
-  const sample = rows.slice(0, sampleCount);
-  const lines = [
-    hasHeader
-      ? headers.join(",")
-      : `# ヘッダーなしCSV（合成列名）: ${headers.join(",")}`,
-  ];
-  for (const row of sample) {
-    lines.push(headers.map((h) => row[h] ?? "").join(","));
-  }
-  return lines.join("\n");
 }
