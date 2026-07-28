@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { getMonthRange } from "@/lib/utils";
+import type { Prisma, Source } from "@/generated/prisma";
 
 const createSchema = z.object({
   date: z.string(),
@@ -13,19 +14,53 @@ const createSchema = z.object({
   confirmed: z.boolean().default(false),
 });
 
+const VALID_SOURCES = new Set(["CSV", "MANUAL", "IMAGE"]);
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const month = searchParams.get("month"); // YYYY-MM
-  const categoryId = searchParams.get("categoryId");
+  const categoriesParam = searchParams.get("categories"); // id1,id2,uncategorized
+  const sourcesParam = searchParams.get("sources"); // CSV,IMAGE,MANUAL
+  // 後方互換
+  const legacyCategoryId = searchParams.get("categoryId");
 
-  const where: Record<string, unknown> = {};
+  const where: Prisma.TransactionWhereInput = {};
 
   if (month) {
     const { start, end } = getMonthRange(month);
     where.date = { gte: start, lte: end };
   }
-  if (categoryId) {
-    where.categoryId = categoryId === "null" ? null : categoryId;
+
+  if (categoriesParam) {
+    const parts = categoriesParam.split(",").map((s) => s.trim()).filter(Boolean);
+    const includeUncategorized = parts.some(
+      (p) => p === "uncategorized" || p === "null"
+    );
+    const ids = parts.filter((p) => p !== "uncategorized" && p !== "null");
+    const or: Prisma.TransactionWhereInput[] = [];
+    if (ids.length > 0) {
+      or.push({ categoryId: { in: ids } });
+    }
+    if (includeUncategorized) {
+      or.push({ categoryId: null });
+    }
+    if (or.length === 1) {
+      Object.assign(where, or[0]);
+    } else if (or.length > 1) {
+      where.OR = or;
+    }
+  } else if (legacyCategoryId) {
+    where.categoryId = legacyCategoryId === "null" ? null : legacyCategoryId;
+  }
+
+  if (sourcesParam) {
+    const sources = sourcesParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s): s is Source => VALID_SOURCES.has(s));
+    if (sources.length > 0) {
+      where.source = { in: sources };
+    }
   }
 
   const transactions = await prisma.transaction.findMany({

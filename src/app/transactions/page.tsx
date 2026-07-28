@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,19 @@ import {
   ChevronLeft,
   ChevronRight,
   AlertTriangle,
+  Filter,
+  RotateCcw,
 } from "lucide-react";
+
+type SourceFilter = Transaction["source"];
+
+const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
+  { value: "CSV", label: "CSV" },
+  { value: "IMAGE", label: "画像" },
+  { value: "MANUAL", label: "手入力" },
+];
+
+const UNCATEGORIZED_KEY = "uncategorized";
 
 function sourceLabel(source: Transaction["source"]) {
   if (source === "CSV") return "CSV";
@@ -27,13 +39,76 @@ function displayMonthLabel(monthKey: string) {
   return `${y}年${parseInt(m, 10)}月`;
 }
 
+function parseCategoriesFromUrl(raw: string | null): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseSourcesFromUrl(raw: string | null): SourceFilter[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s): s is SourceFilter =>
+      s === "CSV" || s === "IMAGE" || s === "MANUAL"
+    );
+}
+
+function readFiltersFromUrl(): {
+  month: string;
+  categoryKeys: string[];
+  sources: SourceFilter[];
+} {
+  if (typeof window === "undefined") {
+    return {
+      month: getMonthKey(new Date()),
+      categoryKeys: [],
+      sources: [],
+    };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    month: params.get("month") || getMonthKey(new Date()),
+    categoryKeys: parseCategoriesFromUrl(params.get("categories")),
+    sources: parseSourcesFromUrl(params.get("sources")),
+  };
+}
+
+function writeFiltersToUrl(
+  month: string,
+  categoryKeys: string[],
+  sources: SourceFilter[]
+) {
+  const params = new URLSearchParams();
+  params.set("month", month);
+  if (categoryKeys.length > 0) {
+    params.set("categories", categoryKeys.join(","));
+  }
+  if (sources.length > 0) {
+    params.set("sources", sources.join(","));
+  }
+  const qs = params.toString();
+  const next = qs ? `/transactions?${qs}` : "/transactions";
+  window.history.replaceState(null, "", next);
+}
+
 type ConfirmState =
   | { type: "selected"; count: number; ids: string[] }
   | { type: "month"; month: string; count: number }
   | { type: "all"; count: number };
 
 export default function TransactionsPage() {
-  const [currentMonth, setCurrentMonth] = useState(getMonthKey(new Date()));
+  const initial = useRef(readFiltersFromUrl());
+  const [currentMonth, setCurrentMonth] = useState(initial.current.month);
+  const [selectedCategoryKeys, setSelectedCategoryKeys] = useState<string[]>(
+    initial.current.categoryKeys
+  );
+  const [selectedSources, setSelectedSources] = useState<SourceFilter[]>(
+    initial.current.sources
+  );
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -44,11 +119,23 @@ export default function TransactionsPage() {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmState | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const hasActiveFilters =
+    selectedCategoryKeys.length > 0 || selectedSources.length > 0;
+
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
+      const params = new URLSearchParams();
+      params.set("month", currentMonth);
+      if (selectedCategoryKeys.length > 0) {
+        params.set("categories", selectedCategoryKeys.join(","));
+      }
+      if (selectedSources.length > 0) {
+        params.set("sources", selectedSources.join(","));
+      }
+
       const [txRes, catRes] = await Promise.all([
-        fetch(`/api/transactions?month=${currentMonth}`),
+        fetch(`/api/transactions?${params.toString()}`),
         fetch("/api/categories"),
       ]);
       if (txRes.ok) setTransactions(await txRes.json());
@@ -57,7 +144,11 @@ export default function TransactionsPage() {
     } finally {
       setLoading(false);
     }
-  }, [currentMonth]);
+  }, [currentMonth, selectedCategoryKeys, selectedSources]);
+
+  useEffect(() => {
+    writeFiltersToUrl(currentMonth, selectedCategoryKeys, selectedSources);
+  }, [currentMonth, selectedCategoryKeys, selectedSources]);
 
   useEffect(() => {
     fetchAll();
@@ -110,6 +201,26 @@ export default function TransactionsPage() {
     const [y, m] = currentMonth.split("-").map(Number);
     const d = new Date(y, m - 1 + delta, 1);
     setCurrentMonth(getMonthKey(d));
+  };
+
+  const toggleCategoryKey = (key: string) => {
+    setSelectedCategoryKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
+
+  const toggleSource = (source: SourceFilter) => {
+    setSelectedSources((prev) =>
+      prev.includes(source)
+        ? prev.filter((s) => s !== source)
+        : [...prev, source]
+    );
+  };
+
+  const resetFilters = () => {
+    setSelectedCategoryKeys([]);
+    setSelectedSources([]);
+    setCurrentMonth(getMonthKey(new Date()));
   };
 
   const openSelectedDelete = () => {
@@ -263,6 +374,117 @@ export default function TransactionsPage() {
         </div>
       )}
 
+      {/* フィルター */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Filter className="h-4 w-4" />
+              フィルター
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm font-medium text-indigo-600">
+                {loading ? "読み込み中..." : `${transactions.length}件表示中`}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={resetFilters}
+                disabled={!hasActiveFilters && currentMonth === getMonthKey(new Date())}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                フィルターをリセット
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <p className="mb-2 text-sm font-medium text-gray-700">カテゴリ（複数選択可）</p>
+            <div className="flex flex-wrap gap-2">
+              {categories.map((c) => {
+                const checked = selectedCategoryKeys.includes(c.id);
+                return (
+                  <label
+                    key={c.id}
+                    className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                      checked
+                        ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                        : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-gray-300"
+                      checked={checked}
+                      onChange={() => toggleCategoryKey(c.id)}
+                    />
+                    <span
+                      className="h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: c.color }}
+                      aria-hidden
+                    />
+                    {c.name}
+                  </label>
+                );
+              })}
+              <label
+                className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                  selectedCategoryKeys.includes(UNCATEGORIZED_KEY)
+                    ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-gray-300"
+                  checked={selectedCategoryKeys.includes(UNCATEGORIZED_KEY)}
+                  onChange={() => toggleCategoryKey(UNCATEGORIZED_KEY)}
+                />
+                未分類
+              </label>
+            </div>
+            {selectedCategoryKeys.length === 0 && (
+              <p className="mt-1.5 text-xs text-gray-400">
+                未選択時はすべてのカテゴリを表示します
+              </p>
+            )}
+          </div>
+
+          <div>
+            <p className="mb-2 text-sm font-medium text-gray-700">取り込み元（複数選択可）</p>
+            <div className="flex flex-wrap gap-2">
+              {SOURCE_OPTIONS.map((opt) => {
+                const checked = selectedSources.includes(opt.value);
+                return (
+                  <label
+                    key={opt.value}
+                    className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                      checked
+                        ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                        : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-gray-300"
+                      checked={checked}
+                      onChange={() => toggleSource(opt.value)}
+                    />
+                    {opt.label}
+                  </label>
+                );
+              })}
+            </div>
+            {selectedSources.length === 0 && (
+              <p className="mt-1.5 text-xs text-gray-400">
+                未選択時はすべての取り込み元を表示します
+              </p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* 一括操作バー */}
       <Card>
         <CardContent className="space-y-3 p-4">
@@ -312,7 +534,10 @@ export default function TransactionsPage() {
       <Card>
         <CardHeader>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <CardTitle>取引一覧（{transactions.length}件）</CardTitle>
+            <CardTitle>
+              取引一覧（{transactions.length}件表示中
+              {hasActiveFilters ? "・フィルター適用中" : ""}）
+            </CardTitle>
             <span className="text-lg font-bold text-indigo-600">
               合計: {formatCurrency(total)}
             </span>
@@ -323,7 +548,9 @@ export default function TransactionsPage() {
             <div className="py-12 text-center text-gray-400">読み込み中...</div>
           ) : transactions.length === 0 ? (
             <div className="py-12 text-center text-gray-400">
-              この月の取引はありません
+              {hasActiveFilters
+                ? "条件に一致する取引はありません"
+                : "この月の取引はありません"}
             </div>
           ) : (
             <>

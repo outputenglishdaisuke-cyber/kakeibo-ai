@@ -16,9 +16,11 @@ interface Props {
   data: CategorySummary[];
 }
 
-const tooltipFormatter = (value: unknown) => {
-  if (typeof value === "number") return [formatCurrency(value), "金額"] as const;
-  return [String(value), "金額"] as const;
+const tooltipFormatter = (value: unknown, name: unknown) => {
+  const label =
+    typeof name === "string" && name.trim() ? name : "未分類";
+  if (typeof value === "number") return [formatCurrency(value), label] as const;
+  return [String(value), label] as const;
 };
 
 function useIsNarrow(breakpointPx = 640) {
