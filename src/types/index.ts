@@ -118,3 +118,22 @@ export interface MonthlySummary {
   total: number;
   categories: CategorySummary[];
 }
+
+/** カテゴリ×月のマトリクス集計 */
+export interface CategoryMonthMatrixRow {
+  categoryId: string | null;
+  categoryName: string;
+  color: string;
+  /** months と同じ長さ。各月の合計 */
+  amounts: number[];
+  rowTotal: number;
+}
+
+export interface CategoryMonthMatrix {
+  from: string;
+  to: string;
+  months: string[];
+  categories: CategoryMonthMatrixRow[];
+  monthTotals: number[];
+  grandTotal: number;
+}

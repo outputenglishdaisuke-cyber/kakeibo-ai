@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ExpensePieChart } from "@/components/charts/ExpensePieChart";
 import { MonthlyTrendChart } from "@/components/charts/MonthlyTrendChart";
+import { CategoryMonthlyMatrixTable } from "@/components/charts/CategoryMonthlyMatrixTable";
 import { formatCurrency, getMonthKey } from "@/lib/utils";
 import type { CategorySummary } from "@/types";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -203,6 +204,9 @@ export default function DashboardPage() {
           )}
         </>
       )}
+
+      {/* カテゴリ×月のスプレッドシート風集計表（独自に期間指定・取得） */}
+      <CategoryMonthlyMatrixTable />
     </div>
   );
 }
