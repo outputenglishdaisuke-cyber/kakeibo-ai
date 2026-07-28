@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseCsvString, mapRowsToTransactions, getCsvSample } from "@/lib/csv-parser";
+import { decodeCsvBuffer, CsvEncodingError } from "@/lib/csv-encoding";
 import { inferCsvColumnMapping } from "@/lib/classifiers";
 
 /**
@@ -16,8 +17,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "ファイルがありません" }, { status: 400 });
     }
 
-    const csvText = await file.text();
-    const { headers, rows } = parseCsvString(csvText);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    let csvText: string;
+    try {
+      csvText = decodeCsvBuffer(buffer);
+    } catch (err) {
+      if (err instanceof CsvEncodingError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      return NextResponse.json(
+        { error: "文字コードを認識できませんでした" },
+        { status: 400 }
+      );
+    }
+
+    const { headers, rows, hasHeader } = parseCsvString(csvText);
 
     if (rows.length === 0) {
       return NextResponse.json(
@@ -26,7 +40,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const sample = getCsvSample(headers, rows, 3);
+    const sample = getCsvSample(headers, rows, 3, hasHeader);
     const mapping = await inferCsvColumnMapping(sample);
     const transactions = mapRowsToTransactions(rows, mapping);
 
@@ -36,6 +50,7 @@ export async function POST(req: NextRequest) {
       mapping,
       transactions,
       totalRows: rows.length,
+      hasHeader,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "CSV の解析に失敗しました";
