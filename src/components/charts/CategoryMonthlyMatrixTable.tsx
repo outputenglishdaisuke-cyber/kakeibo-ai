@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,9 +9,10 @@ import {
   getMonthKey,
   recentMonthRange,
   shiftMonthKey,
+  cn,
 } from "@/lib/utils";
+import { buildTransactionsFilterUrl } from "@/lib/transactions-url";
 import type { CategoryMonthMatrix } from "@/types";
-import { cn } from "@/lib/utils";
 
 const PRESETS = [
   { label: "直近6ヶ月", months: 6 },
@@ -42,7 +44,12 @@ function heatBackground(amount: number, max: number): string | undefined {
   return `rgba(99, 102, 241, ${alpha.toFixed(3)})`;
 }
 
-export function CategoryMonthlyMatrixTable() {
+export function CategoryMonthlyMatrixTable({
+  className,
+}: {
+  className?: string;
+} = {}) {
+  const router = useRouter();
   const today = getMonthKey(new Date());
   const initial = recentMonthRange(6, today);
 
@@ -52,6 +59,7 @@ export function CategoryMonthlyMatrixTable() {
   const [data, setData] = useState<CategoryMonthMatrix | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
 
   const applyPreset = (months: number) => {
     const range = recentMonthRange(months, today);
@@ -115,15 +123,40 @@ export function CategoryMonthlyMatrixTable() {
   const minMonth = shiftMonthKey(today, -119);
   const maxMonth = today;
 
+  const openCell = (
+    month: string,
+    categoryId: string | null,
+    categoryName: string,
+    amount: number
+  ) => {
+    if (!amount) {
+      setHint("この月・カテゴリにはデータがありません");
+      setTimeout(() => setHint(null), 1800);
+      return;
+    }
+    router.push(
+      buildTransactionsFilterUrl({
+        month,
+        categoryId,
+        categoryName,
+      })
+    );
+  };
+
   return (
-    <Card>
+    <Card className={cn(className)}>
       <CardHeader className="space-y-4">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <CardTitle>カテゴリ別月次推移表</CardTitle>
             <p className="mt-1 text-sm text-gray-500">
-              指定期間のカテゴリ×月の支出合計（{rangeLabel}）
+              指定期間のカテゴリ×月の支出合計（{rangeLabel}）。金額セルをクリックすると明細一覧へ移動します。
             </p>
+            {hint && (
+              <p className="mt-1 text-xs text-amber-600" role="status">
+                {hint}
+              </p>
+            )}
           </div>
           {data && !loading && (
             <p className="text-sm font-medium text-indigo-600">
@@ -237,17 +270,53 @@ export function CategoryMonthlyMatrixTable() {
                         <span className="truncate">{row.categoryName}</span>
                       </span>
                     </td>
-                    {row.amounts.map((amount, i) => (
-                      <td
-                        key={`${row.categoryId ?? "u"}-${data.months[i]}`}
-                        className="border-b border-gray-100 px-2 py-2 text-right tabular-nums text-gray-800 group-hover:bg-gray-50/80"
-                        style={{
-                          backgroundColor: heatBackground(amount, maxAmount),
-                        }}
-                      >
-                        {formatCell(amount)}
-                      </td>
-                    ))}
+                    {row.amounts.map((amount, i) => {
+                      const month = data.months[i];
+                      const clickable = amount > 0;
+                      return (
+                        <td
+                          key={`${row.categoryId ?? "u"}-${month}`}
+                          role={clickable ? "button" : undefined}
+                          tabIndex={clickable ? 0 : undefined}
+                          onClick={() =>
+                            openCell(
+                              month,
+                              row.categoryId,
+                              row.categoryName,
+                              amount
+                            )
+                          }
+                          onKeyDown={(e) => {
+                            if (!clickable) return;
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              openCell(
+                                month,
+                                row.categoryId,
+                                row.categoryName,
+                                amount
+                              );
+                            }
+                          }}
+                          className={cn(
+                            "border-b border-gray-100 px-2 py-2 text-right tabular-nums text-gray-800",
+                            clickable
+                              ? "cursor-pointer hover:ring-2 hover:ring-indigo-300 hover:ring-inset hover:brightness-95"
+                              : "cursor-default opacity-70"
+                          )}
+                          style={{
+                            backgroundColor: heatBackground(amount, maxAmount),
+                          }}
+                          title={
+                            clickable
+                              ? `${row.categoryName} / ${displayMonthLabel(month)} の明細を表示`
+                              : "データなし"
+                          }
+                        >
+                          {formatCell(amount)}
+                        </td>
+                      );
+                    })}
                     <td
                       className={cn(
                         "sticky right-0 z-10 border-b border-l border-gray-100 bg-indigo-50/80 px-3 py-2 text-right font-semibold tabular-nums text-indigo-900",

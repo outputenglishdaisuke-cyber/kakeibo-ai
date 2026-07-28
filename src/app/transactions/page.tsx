@@ -68,9 +68,24 @@ function readFiltersFromUrl(): {
     };
   }
   const params = new URLSearchParams(window.location.search);
+  let categoryKeys = parseCategoriesFromUrl(params.get("categories"));
+  // 互換: ?category=食費 または ?category=<id>
+  const single = params.get("category");
+  if (single && categoryKeys.length === 0) {
+    const trimmed = single.trim();
+    if (
+      trimmed === "未分類" ||
+      trimmed === "null" ||
+      trimmed === "uncategorized"
+    ) {
+      categoryKeys = [UNCATEGORIZED_KEY];
+    } else {
+      categoryKeys = [trimmed];
+    }
+  }
   return {
     month: params.get("month") || getMonthKey(new Date()),
-    categoryKeys: parseCategoriesFromUrl(params.get("categories")),
+    categoryKeys,
     sources: parseSourcesFromUrl(params.get("sources")),
   };
 }
@@ -152,6 +167,25 @@ export default function TransactionsPage() {
   useEffect(() => {
     writeFiltersToUrl(currentMonth, selectedCategoryKeys, selectedSources);
   }, [currentMonth, selectedCategoryKeys, selectedSources]);
+
+  // URL の category=名前 を ID に解決
+  useEffect(() => {
+    if (categories.length === 0) return;
+    setSelectedCategoryKeys((prev) => {
+      let changed = false;
+      const next = prev.map((k) => {
+        if (k === UNCATEGORIZED_KEY) return k;
+        if (categories.some((c) => c.id === k)) return k;
+        const byName = categories.find((c) => c.name === k);
+        if (byName) {
+          changed = true;
+          return byName.id;
+        }
+        return k;
+      });
+      return changed ? next : prev;
+    });
+  }, [categories]);
 
   useEffect(() => {
     fetchAll();

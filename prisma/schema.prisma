@@ -51,6 +51,13 @@ model Rule {
   @@index([keyword])
 }
 
+/** アプリ全体の設定（レイアウトなど）。認証なしのため key 単位で1件保存 */
+model AppSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
 enum Source {
   CSV
   MANUAL

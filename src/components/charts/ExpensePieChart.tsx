@@ -14,6 +14,7 @@ import type { CategorySummary } from "@/types";
 
 interface Props {
   data: CategorySummary[];
+  onCategoryClick?: (category: CategorySummary) => void;
 }
 
 const tooltipFormatter = (value: unknown, name: unknown) => {
@@ -35,8 +36,9 @@ function useIsNarrow(breakpointPx = 640) {
   return narrow;
 }
 
-export function ExpensePieChart({ data }: Props) {
+export function ExpensePieChart({ data, onCategoryClick }: Props) {
   const narrow = useIsNarrow();
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
 
   if (data.length === 0) {
     return (
@@ -46,7 +48,6 @@ export function ExpensePieChart({ data }: Props) {
     );
   }
 
-  // Recharts は nameKey で凡例・ラベル名を取る。未分類も明示する。
   const chartData = data.map((d) => ({
     ...d,
     categoryName: d.categoryName?.trim() ? d.categoryName : "未分類",
@@ -65,6 +66,14 @@ export function ExpensePieChart({ data }: Props) {
             paddingAngle={2}
             dataKey="total"
             nameKey="categoryName"
+            cursor={onCategoryClick ? "pointer" : "default"}
+            onClick={(_, index) => {
+              if (!onCategoryClick) return;
+              const item = chartData[index];
+              if (item) onCategoryClick(item);
+            }}
+            onMouseEnter={(_, index) => setActiveIndex(index)}
+            onMouseLeave={() => setActiveIndex(null)}
             label={
               narrow
                 ? false
@@ -75,15 +84,38 @@ export function ExpensePieChart({ data }: Props) {
             }
             labelLine={false}
           >
-            {chartData.map((entry) => (
+            {chartData.map((entry, index) => (
               <Cell
                 key={entry.categoryId ?? `uncategorized-${entry.categoryName}`}
                 fill={entry.color}
+                stroke={activeIndex === index ? "#fff" : "transparent"}
+                strokeWidth={activeIndex === index ? 2 : 0}
+                style={{
+                  cursor: onCategoryClick ? "pointer" : undefined,
+                  filter:
+                    activeIndex === index
+                      ? "brightness(1.12)"
+                      : activeIndex !== null
+                        ? "brightness(0.92)"
+                        : undefined,
+                  outline: "none",
+                  transition: "filter 120ms ease",
+                }}
               />
             ))}
           </Pie>
           <Tooltip formatter={tooltipFormatter} />
-          <Legend />
+          <Legend
+            onClick={(payload) => {
+              if (!onCategoryClick) return;
+              const name =
+                typeof payload?.value === "string" ? payload.value : null;
+              if (!name) return;
+              const item = chartData.find((d) => d.categoryName === name);
+              if (item) onCategoryClick(item);
+            }}
+            wrapperStyle={onCategoryClick ? { cursor: "pointer" } : undefined}
+          />
         </PieChart>
       </ResponsiveContainer>
     </div>
