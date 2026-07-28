@@ -64,43 +64,58 @@ export default function CategoriesPage() {
     fetchCategories();
   };
 
+  const colorPicker = (
+    selected: string,
+    onSelect: (c: string) => void,
+    size: "sm" | "md" = "md"
+  ) => (
+    <div className="flex flex-wrap gap-2">
+      {PRESET_COLORS.map((c) => (
+        <button
+          key={c}
+          type="button"
+          onClick={() => onSelect(c)}
+          aria-label={`色 ${c}`}
+          className={`${
+            size === "md" ? "h-8 w-8 md:h-6 md:w-6" : "h-8 w-8 md:h-5 md:w-5"
+          } rounded-full transition-transform ${
+            selected === c ? "scale-110 ring-2 ring-gray-400 ring-offset-1" : ""
+          }`}
+          style={{ backgroundColor: c }}
+        />
+      ))}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">カテゴリ管理</h1>
 
-      {/* 新規追加フォーム */}
       <Card>
         <CardHeader>
           <CardTitle>新しいカテゴリを追加</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-wrap items-end gap-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">カテゴリ名</label>
+          <div className="flex flex-col gap-4 md:flex-row md:flex-wrap md:items-end">
+            <div className="w-full md:w-auto">
+              <label className="mb-1 block text-xs font-medium text-gray-700">カテゴリ名</label>
               <input
                 type="text"
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+                className="h-11 w-full rounded-lg border border-gray-300 px-3 text-base focus:border-indigo-500 focus:outline-none md:h-auto md:w-auto md:py-2 md:text-sm"
                 placeholder="例: 食費"
                 value={form.name}
                 onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
               />
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">カラー</label>
-              <div className="flex flex-wrap gap-1.5">
-                {PRESET_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => setForm((p) => ({ ...p, color: c }))}
-                    className={`h-6 w-6 rounded-full transition-transform ${
-                      form.color === c ? "ring-2 ring-offset-1 ring-gray-400 scale-110" : ""
-                    }`}
-                    style={{ backgroundColor: c }}
-                  />
-                ))}
-              </div>
+            <div className="w-full md:w-auto">
+              <label className="mb-1 block text-xs font-medium text-gray-700">カラー</label>
+              {colorPicker(form.color, (c) => setForm((p) => ({ ...p, color: c })))}
             </div>
-            <Button onClick={createCategory} disabled={!form.name.trim()}>
+            <Button
+              className="w-full md:w-auto"
+              onClick={createCategory}
+              disabled={!form.name.trim()}
+            >
               <Plus className="h-4 w-4" />
               追加
             </Button>
@@ -108,7 +123,6 @@ export default function CategoriesPage() {
         </CardContent>
       </Card>
 
-      {/* カテゴリ一覧 */}
       <Card>
         <CardHeader>
           <CardTitle>カテゴリ一覧</CardTitle>
@@ -119,56 +133,77 @@ export default function CategoriesPage() {
           ) : categories.length === 0 ? (
             <div className="py-8 text-center text-gray-400">カテゴリがありません</div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-3">
               {categories.map((cat) => (
                 <div
                   key={cat.id}
-                  className="flex items-center gap-4 rounded-lg border border-gray-100 px-4 py-3 hover:bg-gray-50"
+                  className="rounded-xl border border-gray-100 p-4 md:flex md:items-center md:gap-4 md:rounded-lg md:px-4 md:py-3 md:hover:bg-gray-50"
                 >
                   {editingId === cat.id ? (
-                    <>
+                    <div className="flex w-full flex-col gap-3 md:flex-row md:items-center md:gap-4">
                       <input
                         type="text"
-                        className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-indigo-500 focus:outline-none"
+                        className="h-11 w-full rounded-lg border border-gray-300 px-3 text-base focus:border-indigo-500 focus:outline-none md:h-auto md:flex-1 md:py-1.5 md:text-sm"
                         value={editForm.name}
                         onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
                       />
-                      <div className="flex gap-1.5">
-                        {PRESET_COLORS.map((c) => (
-                          <button
-                            key={c}
-                            onClick={() => setEditForm((p) => ({ ...p, color: c }))}
-                            className={`h-5 w-5 rounded-full transition-transform ${
-                              editForm.color === c ? "ring-2 ring-offset-1 ring-gray-400 scale-110" : ""
-                            }`}
-                            style={{ backgroundColor: c }}
-                          />
-                        ))}
+                      {colorPicker(
+                        editForm.color,
+                        (c) => setEditForm((p) => ({ ...p, color: c })),
+                        "sm"
+                      )}
+                      <div className="flex gap-2">
+                        <Button
+                          className="flex-1 md:flex-none"
+                          variant="outline"
+                          onClick={() => saveEdit(cat.id)}
+                        >
+                          <Check className="h-4 w-4 text-green-600" />
+                          <span className="md:hidden">保存</span>
+                        </Button>
+                        <Button
+                          className="flex-1 md:flex-none"
+                          variant="ghost"
+                          onClick={() => setEditingId(null)}
+                        >
+                          <X className="h-4 w-4 text-gray-400" />
+                          <span className="md:hidden">取消</span>
+                        </Button>
                       </div>
-                      <Button variant="ghost" size="icon" onClick={() => saveEdit(cat.id)}>
-                        <Check className="h-4 w-4 text-green-600" />
-                      </Button>
-                      <Button variant="ghost" size="icon" onClick={() => setEditingId(null)}>
-                        <X className="h-4 w-4 text-gray-400" />
-                      </Button>
-                    </>
+                    </div>
                   ) : (
-                    <>
-                      <div
-                        className="h-4 w-4 rounded-full flex-shrink-0"
-                        style={{ backgroundColor: cat.color }}
-                      />
-                      <span className="flex-1 text-sm font-medium">{cat.name}</span>
-                      <span className="text-xs text-gray-400">
-                        {cat._count?.transactions ?? 0}件
-                      </span>
-                      <Button variant="ghost" size="icon" onClick={() => startEdit(cat)}>
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button variant="ghost" size="icon" onClick={() => deleteCategory(cat.id)}>
-                        <Trash2 className="h-4 w-4 text-red-400" />
-                      </Button>
-                    </>
+                    <div className="flex w-full flex-col gap-3 md:flex-row md:items-center md:gap-4">
+                      <div className="flex min-w-0 flex-1 items-center gap-3">
+                        <div
+                          className="h-4 w-4 flex-shrink-0 rounded-full"
+                          style={{ backgroundColor: cat.color }}
+                        />
+                        <span className="truncate text-base font-medium md:text-sm">
+                          {cat.name}
+                        </span>
+                        <span className="text-xs text-gray-400">
+                          {cat._count?.transactions ?? 0}件
+                        </span>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          className="flex-1 md:flex-none"
+                          onClick={() => startEdit(cat)}
+                        >
+                          <Pencil className="h-4 w-4" />
+                          <span className="md:hidden">編集</span>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          className="flex-1 md:flex-none"
+                          onClick={() => deleteCategory(cat.id)}
+                        >
+                          <Trash2 className="h-4 w-4 text-red-400" />
+                          <span className="md:hidden">削除</span>
+                        </Button>
+                      </div>
+                    </div>
                   )}
                 </div>
               ))}

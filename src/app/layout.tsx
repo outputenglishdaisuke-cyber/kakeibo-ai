@@ -22,7 +22,9 @@ export default function RootLayout({
     <html lang="ja" className={`${geist.variable} h-full antialiased`}>
       <body className="h-full bg-gray-50 text-gray-900">
         <Sidebar />
-        <main className="ml-56 min-h-screen p-8">{children}</main>
+        <main className="min-h-screen px-4 pb-24 pt-16 md:ml-56 md:p-8 md:pb-8 md:pt-8">
+          {children}
+        </main>
       </body>
     </html>
   );

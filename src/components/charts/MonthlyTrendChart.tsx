@@ -41,24 +41,27 @@ export function MonthlyTrendChart({ data }: Props) {
   }));
 
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <ComposedChart data={formatted}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-        <XAxis dataKey="label" tick={{ fontSize: 12 }} />
-        <YAxis
-          tickFormatter={(v: number) => `¥${(v / 1000).toFixed(0)}k`}
-          tick={{ fontSize: 12 }}
-        />
-        <Tooltip formatter={tooltipFormatter} />
-        <Bar dataKey="total" fill="#6366f1" radius={[4, 4, 0, 0] as [number, number, number, number]} />
-        <Line
-          type="monotone"
-          dataKey="total"
-          stroke="#f59e0b"
-          strokeWidth={2}
-          dot={false}
-        />
-      </ComposedChart>
-    </ResponsiveContainer>
+    <div className="h-[220px] w-full sm:h-[260px]">
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart data={formatted} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+          <YAxis
+            width={48}
+            tickFormatter={(v: number) => `¥${(v / 1000).toFixed(0)}k`}
+            tick={{ fontSize: 11 }}
+          />
+          <Tooltip formatter={tooltipFormatter} />
+          <Bar dataKey="total" fill="#6366f1" radius={[4, 4, 0, 0] as [number, number, number, number]} />
+          <Line
+            type="monotone"
+            dataKey="total"
+            stroke="#f59e0b"
+            strokeWidth={2}
+            dot={false}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }

@@ -58,22 +58,30 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold text-gray-900">ダッシュボード</h1>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="icon" onClick={() => changeMonth(-1)}>
-            <ChevronLeft className="h-4 w-4" />
+        <div className="flex items-center justify-between gap-2 sm:justify-end">
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-12 w-12 sm:h-9 sm:w-9"
+            onClick={() => changeMonth(-1)}
+            aria-label="前月"
+          >
+            <ChevronLeft className="h-5 w-5 sm:h-4 sm:w-4" />
           </Button>
-          <span className="min-w-[100px] text-center font-medium">
+          <span className="min-w-[120px] text-center text-base font-semibold sm:min-w-[100px] sm:text-sm sm:font-medium">
             {displayMonth()}
           </span>
           <Button
             variant="outline"
             size="icon"
+            className="h-12 w-12 sm:h-9 sm:w-9"
             onClick={() => changeMonth(1)}
             disabled={currentMonth >= getMonthKey(new Date())}
+            aria-label="次月"
           >
-            <ChevronRight className="h-4 w-4" />
+            <ChevronRight className="h-5 w-5 sm:h-4 sm:w-4" />
           </Button>
         </div>
       </div>
@@ -125,8 +133,8 @@ export default function DashboardPage() {
             </Card>
           </div>
 
+          {/* PC: 横並び / スマホ: 縦積み */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            {/* 円グラフ */}
             <Card>
               <CardHeader>
                 <CardTitle>カテゴリ別支出</CardTitle>
@@ -136,7 +144,6 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
 
-            {/* 月次推移 */}
             <Card>
               <CardHeader>
                 <CardTitle>月次推移（直近6ヶ月）</CardTitle>
@@ -160,17 +167,19 @@ export default function DashboardPage() {
                     .map((cat) => (
                       <div
                         key={cat.categoryId ?? "uncategorized"}
-                        className="flex items-center gap-3"
+                        className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3"
                       >
-                        <div
-                          className="h-3 w-3 rounded-full flex-shrink-0"
-                          style={{ backgroundColor: cat.color }}
-                        />
-                        <span className="flex-1 text-sm text-gray-700">
-                          {cat.categoryName}
-                        </span>
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 h-2 rounded-full bg-gray-100 overflow-hidden">
+                        <div className="flex min-w-0 flex-1 items-center gap-3">
+                          <div
+                            className="h-3 w-3 flex-shrink-0 rounded-full"
+                            style={{ backgroundColor: cat.color }}
+                          />
+                          <span className="truncate text-sm text-gray-700">
+                            {cat.categoryName}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 pl-6 sm:pl-0">
+                          <div className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-100 sm:w-32 sm:flex-none">
                             <div
                               className="h-full rounded-full"
                               style={{
@@ -179,10 +188,10 @@ export default function DashboardPage() {
                               }}
                             />
                           </div>
-                          <span className="w-10 text-right text-xs text-gray-500">
+                          <span className="w-10 flex-shrink-0 text-right text-xs text-gray-500">
                             {cat.percentage}%
                           </span>
-                          <span className="w-28 text-right text-sm font-medium">
+                          <span className="w-24 flex-shrink-0 text-right text-sm font-medium sm:w-28">
                             {formatCurrency(cat.total)}
                           </span>
                         </div>

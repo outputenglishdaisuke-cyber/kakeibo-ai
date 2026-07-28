@@ -21,17 +21,14 @@ export default function ImportPage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  // CSV アップロード
   const [csvFile, setCsvFile] = useState<File | null>(null);
 
-  // 手入力フォーム
   const [manualForm, setManualForm] = useState({
     date: new Date().toISOString().split("T")[0],
     description: "",
     amount: "",
   });
 
-  // 画像アップロード
   const [imageFile, setImageFile] = useState<File | null>(null);
 
   const handleCsvUpload = async () => {
@@ -124,6 +121,9 @@ export default function ImportPage() {
     { key: "image", label: "画像", icon: <Camera className="h-4 w-4" /> },
   ];
 
+  const inputClass =
+    "h-11 w-full rounded-lg border border-gray-300 px-3 text-base focus:border-indigo-500 focus:outline-none md:h-auto md:py-2 md:text-sm";
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">データ取り込み</h1>
@@ -145,13 +145,13 @@ export default function ImportPage() {
         </div>
       )}
 
-      {/* タブ */}
-      <div className="flex gap-1 rounded-lg border border-gray-200 bg-gray-50 p-1 w-fit">
+      {/* タブ: スマホでも見切れないよう全幅均等 */}
+      <div className="grid w-full grid-cols-3 gap-1 rounded-lg border border-gray-200 bg-gray-50 p-1 sm:flex sm:w-fit">
         {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => { setTab(t.key); setParsed(null); }}
-            className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+            className={`flex min-h-11 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-sm font-medium transition-colors sm:gap-2 sm:px-4 ${
               tab === t.key
                 ? "bg-white text-indigo-700 shadow-sm"
                 : "text-gray-600 hover:text-gray-900"
@@ -172,15 +172,14 @@ export default function ImportPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* CSV タブ */}
           {tab === "csv" && (
             <div className="space-y-4">
               <p className="text-sm text-gray-500">
                 カード会社のCSVをアップロードすると、AIが列を自動認識して支出を抽出します。
               </p>
-              <label className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-gray-300 p-10 hover:border-indigo-400 hover:bg-indigo-50/30 transition-colors">
+              <label className="flex min-h-[140px] cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-gray-300 p-6 transition-colors hover:border-indigo-400 hover:bg-indigo-50/30 sm:p-10">
                 <Upload className="h-8 w-8 text-gray-400" />
-                <span className="text-sm text-gray-500">
+                <span className="px-2 text-center text-sm text-gray-500">
                   {csvFile ? csvFile.name : "CSV ファイルをクリックまたはドロップ"}
                 </span>
                 <input
@@ -200,60 +199,66 @@ export default function ImportPage() {
             </div>
           )}
 
-          {/* 手入力タブ */}
           {tab === "manual" && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">日付</label>
+                  <label className="mb-1 block text-xs font-medium text-gray-700">日付</label>
                   <input
                     type="date"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+                    className={inputClass}
                     value={manualForm.date}
                     onChange={(e) => setManualForm((p) => ({ ...p, date: e.target.value }))}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">利用先</label>
+                  <label className="mb-1 block text-xs font-medium text-gray-700">利用先</label>
                   <input
                     type="text"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+                    className={inputClass}
                     placeholder="例: スターバックス"
                     value={manualForm.description}
                     onChange={(e) => setManualForm((p) => ({ ...p, description: e.target.value }))}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">金額（円）</label>
+                  <label className="mb-1 block text-xs font-medium text-gray-700">金額（円）</label>
                   <input
                     type="number"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+                    className={inputClass}
                     placeholder="例: 500"
                     value={manualForm.amount}
                     onChange={(e) => setManualForm((p) => ({ ...p, amount: e.target.value }))}
                   />
                 </div>
               </div>
-              <Button onClick={handleManualAdd} disabled={!manualForm.description || !manualForm.amount}>
+              <Button
+                className="w-full sm:w-auto"
+                onClick={handleManualAdd}
+                disabled={!manualForm.description || !manualForm.amount}
+              >
                 リストに追加
               </Button>
             </div>
           )}
 
-          {/* 画像タブ */}
           {tab === "image" && (
             <div className="space-y-4">
               <p className="text-sm text-gray-500">
                 クレジットカードや銀行の利用明細画像をアップロードすると、AI が OCR で取引を抽出します。
+                スマホではカメラで直接撮影できます。
               </p>
-              <label className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-gray-300 p-10 hover:border-indigo-400 hover:bg-indigo-50/30 transition-colors">
+              <label className="flex min-h-[140px] cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-gray-300 p-6 transition-colors hover:border-indigo-400 hover:bg-indigo-50/30 sm:p-10">
                 <Camera className="h-8 w-8 text-gray-400" />
-                <span className="text-sm text-gray-500">
-                  {imageFile ? imageFile.name : "JPEG / PNG 画像をクリックまたはドロップ"}
+                <span className="px-2 text-center text-sm text-gray-500">
+                  {imageFile
+                    ? imageFile.name
+                    : "撮影または JPEG / PNG 画像を選択"}
                 </span>
                 <input
                   type="file"
-                  accept="image/jpeg,image/png,image/webp"
+                  accept="image/*"
+                  capture="environment"
                   className="hidden"
                   onChange={(e) => setImageFile(e.target.files?.[0] ?? null)}
                 />
@@ -270,29 +275,29 @@ export default function ImportPage() {
         </CardContent>
       </Card>
 
-      {/* プレビュー・確認画面 */}
       {parsed && parsed.length > 0 && (
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <CardTitle>
                 取り込み内容の確認（{parsed.length}件）
               </CardTitle>
-              <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setParsed(null)}>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button variant="outline" className="w-full sm:w-auto" onClick={() => setParsed(null)}>
                   キャンセル
                 </Button>
-                <Button onClick={confirmAndSave} disabled={saving}>
+                <Button className="w-full sm:w-auto" onClick={confirmAndSave} disabled={saving}>
                   {saving ? "保存中..." : `${parsed.length}件を保存する`}
                 </Button>
               </div>
             </div>
-            <p className="text-sm text-gray-500 mt-1">
+            <p className="mt-1 text-sm text-gray-500">
               内容を確認してから「保存する」を押してください。AI が自動的にカテゴリを分類します。
             </p>
           </CardHeader>
           <CardContent>
-            <div className="overflow-x-auto">
+            {/* PC: テーブル */}
+            <div className="hidden md:block">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-200 text-left text-gray-500">
@@ -311,7 +316,7 @@ export default function ImportPage() {
                       <td className="py-3">
                         <button
                           onClick={() => removeItem(i)}
-                          className="text-red-400 hover:text-red-600 text-xs"
+                          className="text-xs text-red-400 hover:text-red-600"
                         >
                           削除
                         </button>
@@ -320,6 +325,33 @@ export default function ImportPage() {
                   ))}
                 </tbody>
               </table>
+            </div>
+
+            {/* スマホ: カード */}
+            <div className="space-y-3 md:hidden">
+              {parsed.map((tx, i) => (
+                <div
+                  key={i}
+                  className="rounded-xl border border-gray-200 p-4"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-gray-500">{formatDate(tx.date)}</p>
+                      <p className="mt-1 truncate font-medium text-gray-900">
+                        {tx.description}
+                      </p>
+                    </div>
+                    <p className="flex-shrink-0 font-bold">{formatCurrency(tx.amount)}</p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    className="mt-3 w-full text-red-500"
+                    onClick={() => removeItem(i)}
+                  >
+                    削除
+                  </Button>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>
