@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
 
     const byCategory: Record<
       string,
-      { categoryId: string | null; name: string; color: string; total: number }
+      { categoryId: string | null; categoryName: string; color: string; total: number }
     > = {};
 
     for (const tx of transactions) {
@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
       if (!byCategory[key]) {
         byCategory[key] = {
           categoryId: tx.categoryId,
-          name: tx.category?.name ?? "未分類",
+          categoryName: tx.category?.name ?? "未分類",
           color: tx.category?.color ?? "#94a3b8",
           total: 0,
         };

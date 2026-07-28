@@ -44,12 +44,18 @@ export function ExpensePieChart({ data }: Props) {
     );
   }
 
+  // Recharts は nameKey で凡例・ラベル名を取る。未分類も明示する。
+  const chartData = data.map((d) => ({
+    ...d,
+    categoryName: d.categoryName?.trim() ? d.categoryName : "未分類",
+  }));
+
   return (
     <div className="h-[260px] w-full sm:h-[320px]">
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Pie
-            data={data}
+            data={chartData}
             cx="50%"
             cy="50%"
             innerRadius={narrow ? 45 : 60}
@@ -60,13 +66,18 @@ export function ExpensePieChart({ data }: Props) {
             label={
               narrow
                 ? false
-                : ({ name, payload }: { name?: string; payload?: CategorySummary }) =>
-                    payload ? `${payload.categoryName} ${payload.percentage}%` : name ?? ""
+                : ({ payload }: { payload?: CategorySummary }) =>
+                    payload
+                      ? `${payload.categoryName || "未分類"} ${payload.percentage}%`
+                      : ""
             }
             labelLine={false}
           >
-            {data.map((entry, index) => (
-              <Cell key={`cell-${index}`} fill={entry.color} />
+            {chartData.map((entry) => (
+              <Cell
+                key={entry.categoryId ?? `uncategorized-${entry.categoryName}`}
+                fill={entry.color}
+              />
             ))}
           </Pie>
           <Tooltip formatter={tooltipFormatter} />

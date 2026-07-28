@@ -127,7 +127,7 @@ export default function DashboardPage() {
               <CardContent>
                 <p className="text-xl font-bold text-gray-900 truncate">
                   {summary?.categories.sort((a, b) => b.total - a.total)[0]
-                    ?.categoryName ?? "-"}
+                    ?.categoryName?.trim() || "-"}
                 </p>
               </CardContent>
             </Card>
@@ -175,7 +175,7 @@ export default function DashboardPage() {
                             style={{ backgroundColor: cat.color }}
                           />
                           <span className="truncate text-sm text-gray-700">
-                            {cat.categoryName}
+                            {cat.categoryName?.trim() ? cat.categoryName : "未分類"}
                           </span>
                         </div>
                         <div className="flex items-center gap-3 pl-6 sm:pl-0">
