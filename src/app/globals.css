@@ -20,27 +20,3 @@ body {
 * {
   box-sizing: border-box;
 }
-
-/* ダッシュボードグリッド（react-grid-layout） */
-.react-grid-item.react-draggable-dragging {
-  opacity: 0.88;
-  z-index: 40;
-  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
-  transition: none;
-}
-
-.react-grid-item.react-resizable-resizing {
-  opacity: 0.92;
-  z-index: 40;
-}
-
-.react-grid-item > .react-resizable-handle::after {
-  border-right-color: #94a3b8;
-  border-bottom-color: #94a3b8;
-}
-
-.dashboard-grid .react-grid-placeholder {
-  background: #c7d2fe !important;
-  opacity: 0.35;
-  border-radius: 0.75rem;
-}

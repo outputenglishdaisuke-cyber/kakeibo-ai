@@ -72,9 +72,9 @@ export function BudgetPerformanceTable({
   }, [month]);
 
   return (
-    <Card className={cn("h-full", className)}>
-      <CardHeader>
-        <CardTitle>予算に対する実績</CardTitle>
+    <Card className={cn("h-full min-w-0", className)}>
+      <CardHeader className="pb-3">
+        <CardTitle>予算との比較</CardTitle>
         <p className="text-xs text-gray-500">
           青は予算内、赤は予算超過です。家賃は比較対象に含みません。
         </p>
@@ -93,10 +93,10 @@ export function BudgetPerformanceTable({
             <table className="w-full min-w-[560px] text-sm">
               <thead>
                 <tr className="border-b border-gray-200 bg-gray-50 text-gray-600">
-                  <th className="px-4 py-3 text-left font-medium">カテゴリ</th>
-                  <th className="px-4 py-3 text-right font-medium">目標</th>
-                  <th className="px-4 py-3 text-right font-medium">実績</th>
-                  <th className="px-4 py-3 text-right font-medium">
+                  <th className="px-4 py-2.5 text-left font-medium">カテゴリ</th>
+                  <th className="px-4 py-2.5 text-right font-medium">目標</th>
+                  <th className="px-4 py-2.5 text-right font-medium">実績</th>
+                  <th className="px-4 py-2.5 text-right font-medium">
                     目標との差
                   </th>
                 </tr>
@@ -104,7 +104,7 @@ export function BudgetPerformanceTable({
               <tbody className="divide-y divide-gray-100">
                 {data.rows.map((row) => (
                   <tr key={row.categoryId} className="hover:bg-gray-50">
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-2.5">
                       <span className="inline-flex items-center gap-2 font-medium">
                         <span
                           className="h-2.5 w-2.5 rounded-full"
@@ -114,15 +114,15 @@ export function BudgetPerformanceTable({
                         {row.categoryName}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       {formatCurrency(row.targetAmount)}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">
+                    <td className="px-4 py-2.5 text-right tabular-nums">
                       {formatCurrency(row.actualAmount)}
                     </td>
                     <td
                       className={cn(
-                        "px-4 py-3 text-right tabular-nums",
+                        "px-4 py-2.5 text-right tabular-nums",
                         differenceClass(row.difference)
                       )}
                     >
@@ -131,16 +131,16 @@ export function BudgetPerformanceTable({
                   </tr>
                 ))}
                 <tr className="border-t-2 border-gray-300 bg-gray-50">
-                  <td className="px-4 py-3 font-bold">合計</td>
-                  <td className="px-4 py-3 text-right font-bold tabular-nums">
+                  <td className="px-4 py-2.5 font-bold">合計</td>
+                  <td className="px-4 py-2.5 text-right font-bold tabular-nums">
                     {formatCurrency(data.totals.targetAmount)}
                   </td>
-                  <td className="px-4 py-3 text-right font-bold tabular-nums">
+                  <td className="px-4 py-2.5 text-right font-bold tabular-nums">
                     {formatCurrency(data.totals.actualAmount)}
                   </td>
                   <td
                     className={cn(
-                      "px-4 py-3 text-right tabular-nums",
+                      "px-4 py-2.5 text-right tabular-nums",
                       differenceClass(data.totals.difference)
                     )}
                   >

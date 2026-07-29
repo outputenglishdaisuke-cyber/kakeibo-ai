@@ -41,7 +41,7 @@ export function MonthlyTrendChart({ data }: Props) {
   }));
 
   return (
-    <div className="h-[220px] w-full sm:h-[260px]">
+    <div className="h-[260px] w-full sm:h-[300px]">
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={formatted} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
@@ -52,13 +52,19 @@ export function MonthlyTrendChart({ data }: Props) {
             tick={{ fontSize: 11 }}
           />
           <Tooltip formatter={tooltipFormatter} />
-          <Bar dataKey="total" fill="#6366f1" radius={[4, 4, 0, 0] as [number, number, number, number]} />
+          <Bar
+            dataKey="total"
+            fill="#6366f1"
+            radius={[4, 4, 0, 0] as [number, number, number, number]}
+            isAnimationActive={false}
+          />
           <Line
             type="monotone"
             dataKey="total"
             stroke="#f59e0b"
             strokeWidth={2}
             dot={false}
+            isAnimationActive={false}
           />
         </ComposedChart>
       </ResponsiveContainer>

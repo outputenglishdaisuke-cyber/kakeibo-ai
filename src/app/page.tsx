@@ -6,7 +6,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ExpensePieChart } from "@/components/charts/ExpensePieChart";
 import { MonthlyTrendChart } from "@/components/charts/MonthlyTrendChart";
 import { CategoryMonthlyMatrixTable } from "@/components/charts/CategoryMonthlyMatrixTable";
-import { DashboardGrid } from "@/components/dashboard/DashboardGrid";
 import { BudgetPerformanceTable } from "@/components/dashboard/BudgetPerformanceTable";
 import { formatCurrency, getMonthKey } from "@/lib/utils";
 import { buildTransactionsFilterUrl } from "@/lib/transactions-url";
@@ -79,208 +78,8 @@ export default function DashboardPage() {
     return [...summary.categories].sort((a, b) => b.total - a.total);
   }, [summary]);
 
-  const topCategoryName =
-    sortedCategories[0]?.categoryName?.trim() || "-";
-
-  const widgets = useMemo(() => {
-    if (loading) {
-      return {
-        "stat-total": (
-          <Card className="h-full">
-            <CardContent className="flex h-full items-center justify-center text-gray-400">
-              …
-            </CardContent>
-          </Card>
-        ),
-        "stat-count": (
-          <Card className="h-full">
-            <CardContent className="flex h-full items-center justify-center text-gray-400">
-              …
-            </CardContent>
-          </Card>
-        ),
-        "stat-top": (
-          <Card className="h-full">
-            <CardContent className="flex h-full items-center justify-center text-gray-400">
-              …
-            </CardContent>
-          </Card>
-        ),
-        pie: (
-          <Card className="h-full">
-            <CardContent className="flex h-full items-center justify-center text-gray-400">
-              読み込み中...
-            </CardContent>
-          </Card>
-        ),
-        trend: (
-          <Card className="h-full">
-            <CardContent className="flex h-full items-center justify-center text-gray-400">
-              読み込み中...
-            </CardContent>
-          </Card>
-        ),
-        breakdown: (
-          <Card className="h-full">
-            <CardContent className="flex h-full items-center justify-center text-gray-400">
-              読み込み中...
-            </CardContent>
-          </Card>
-        ),
-        budget: <BudgetPerformanceTable month={currentMonth} />,
-        matrix: <CategoryMonthlyMatrixTable className="h-full" />,
-      };
-    }
-
-    return {
-      "stat-total": (
-        <Card className="h-full">
-          <CardHeader>
-            <CardTitle className="text-sm font-medium text-gray-500">
-              月合計支出
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-3xl font-bold text-indigo-600">
-              {formatCurrency(summary?.total ?? 0)}
-            </p>
-          </CardContent>
-        </Card>
-      ),
-      "stat-count": (
-        <Card className="h-full">
-          <CardHeader>
-            <CardTitle className="text-sm font-medium text-gray-500">
-              カテゴリ数
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-3xl font-bold text-gray-900">
-              {summary?.categories.length ?? 0}
-            </p>
-          </CardContent>
-        </Card>
-      ),
-      "stat-top": (
-        <Card className="h-full">
-          <CardHeader>
-            <CardTitle className="text-sm font-medium text-gray-500">
-              最大支出カテゴリ
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {sortedCategories[0] ? (
-              <button
-                type="button"
-                className="truncate text-left text-xl font-bold text-gray-900 underline-offset-4 hover:underline"
-                onClick={() => goToCategoryTransactions(sortedCategories[0])}
-              >
-                {topCategoryName}
-              </button>
-            ) : (
-              <p className="text-xl font-bold text-gray-900 truncate">-</p>
-            )}
-          </CardContent>
-        </Card>
-      ),
-      pie: (
-        <Card className="h-full">
-          <CardHeader>
-            <CardTitle>カテゴリ別支出</CardTitle>
-            <p className="text-xs text-gray-500">
-              扇形をクリックすると明細一覧へ移動します
-            </p>
-          </CardHeader>
-          <CardContent>
-            <ExpensePieChart
-              data={summary?.categories ?? []}
-              onCategoryClick={goToCategoryTransactions}
-            />
-          </CardContent>
-        </Card>
-      ),
-      trend: (
-        <Card className="h-full">
-          <CardHeader>
-            <CardTitle>月次推移（直近6ヶ月）</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <MonthlyTrendChart data={trend?.trend ?? []} />
-          </CardContent>
-        </Card>
-      ),
-      breakdown: (
-        <Card className="h-full">
-          <CardHeader>
-            <CardTitle>カテゴリ別内訳</CardTitle>
-            <p className="text-xs text-gray-500">
-              カテゴリ名をクリックすると明細一覧へ移動します
-            </p>
-          </CardHeader>
-          <CardContent>
-            {sortedCategories.length === 0 ? (
-              <p className="py-8 text-center text-gray-400">データがありません</p>
-            ) : (
-              <div className="space-y-3">
-                {sortedCategories.map((cat) => (
-                  <div
-                    key={cat.categoryId ?? "uncategorized"}
-                    className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3"
-                  >
-                    <div className="flex min-w-0 flex-1 items-center gap-3">
-                      <div
-                        className="h-3 w-3 flex-shrink-0 rounded-full"
-                        style={{ backgroundColor: cat.color }}
-                      />
-                      <button
-                        type="button"
-                        className="truncate text-left text-sm text-gray-700 underline-offset-2 hover:text-indigo-700 hover:underline"
-                        onClick={() => goToCategoryTransactions(cat)}
-                      >
-                        {cat.categoryName?.trim()
-                          ? cat.categoryName
-                          : "未分類"}
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-3 pl-6 sm:pl-0">
-                      <div className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-100 sm:w-32 sm:flex-none">
-                        <div
-                          className="h-full rounded-full"
-                          style={{
-                            width: `${cat.percentage}%`,
-                            backgroundColor: cat.color,
-                          }}
-                        />
-                      </div>
-                      <span className="w-10 flex-shrink-0 text-right text-xs text-gray-500">
-                        {cat.percentage}%
-                      </span>
-                      <span className="w-24 flex-shrink-0 text-right text-sm font-medium sm:w-28">
-                        {formatCurrency(cat.total)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ),
-      budget: <BudgetPerformanceTable month={currentMonth} />,
-      matrix: <CategoryMonthlyMatrixTable className="h-full" />,
-    };
-  }, [
-    loading,
-    summary,
-    trend,
-    sortedCategories,
-    topCategoryName,
-    goToCategoryTransactions,
-    currentMonth,
-  ]);
-
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-5 overflow-x-hidden">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold text-gray-900">ダッシュボード</h1>
         <div className="flex items-center justify-between gap-2 sm:justify-end">
@@ -309,7 +108,111 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <DashboardGrid>{widgets}</DashboardGrid>
+      <div className="grid min-w-0 grid-cols-1 gap-5 lg:grid-cols-2">
+        <Card className="min-w-0 overflow-hidden">
+          <CardHeader className="pb-2">
+            <CardTitle>カテゴリ別支出</CardTitle>
+            <p className="text-sm font-medium text-gray-600">
+              合計支出:{" "}
+              <span className="font-semibold text-indigo-600">
+                {loading ? "…" : formatCurrency(summary?.total ?? 0)}
+              </span>
+            </p>
+            <p className="text-xs text-gray-500">
+              扇形をクリックすると明細一覧へ移動します
+            </p>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <div className="flex h-[260px] items-center justify-center text-gray-400 sm:h-[300px]">
+                読み込み中...
+              </div>
+            ) : (
+              <ExpensePieChart
+                data={summary?.categories ?? []}
+                onCategoryClick={goToCategoryTransactions}
+              />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="min-w-0 overflow-hidden">
+          <CardHeader className="pb-2">
+            <CardTitle>月次推移（直近6ヶ月）</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <div className="flex h-[260px] items-center justify-center text-gray-400 sm:h-[300px]">
+                読み込み中...
+              </div>
+            ) : (
+              <MonthlyTrendChart data={trend?.trend ?? []} />
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <BudgetPerformanceTable month={currentMonth} />
+
+      <CategoryMonthlyMatrixTable className="min-w-0" />
+
+      <Card className="min-w-0">
+        <CardHeader className="pb-3">
+          <CardTitle>カテゴリ別内訳</CardTitle>
+          <p className="text-xs text-gray-500">
+            カテゴリ名をクリックすると明細一覧へ移動します
+          </p>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="flex h-28 items-center justify-center text-gray-400">
+              読み込み中...
+            </div>
+          ) : sortedCategories.length === 0 ? (
+            <p className="py-8 text-center text-gray-400">データがありません</p>
+          ) : (
+            <div className="space-y-2.5">
+              {sortedCategories.map((cat) => (
+                <div
+                  key={cat.categoryId ?? "uncategorized"}
+                  className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3"
+                >
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                    <div
+                      className="h-3 w-3 flex-shrink-0 rounded-full"
+                      style={{ backgroundColor: cat.color }}
+                    />
+                    <button
+                      type="button"
+                      className="truncate text-left text-sm text-gray-700 underline-offset-2 hover:text-indigo-700 hover:underline"
+                      onClick={() => goToCategoryTransactions(cat)}
+                    >
+                      {cat.categoryName?.trim() ? cat.categoryName : "未分類"}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-3 pl-6 sm:pl-0">
+                    <div className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-100 sm:w-32 sm:flex-none">
+                      <div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${cat.percentage}%`,
+                          backgroundColor: cat.color,
+                        }}
+                      />
+                    </div>
+                    <span className="w-10 flex-shrink-0 text-right text-xs text-gray-500">
+                      {cat.percentage}%
+                    </span>
+                    <span className="w-24 flex-shrink-0 text-right text-sm font-medium sm:w-28">
+                      {formatCurrency(cat.total)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

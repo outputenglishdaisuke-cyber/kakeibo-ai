@@ -54,7 +54,7 @@ export function ExpensePieChart({ data, onCategoryClick }: Props) {
   }));
 
   return (
-    <div className="h-[260px] w-full sm:h-[320px]">
+    <div className="h-[260px] w-full sm:h-[300px]">
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Pie
@@ -62,10 +62,11 @@ export function ExpensePieChart({ data, onCategoryClick }: Props) {
             cx="50%"
             cy="50%"
             innerRadius={narrow ? 45 : 60}
-            outerRadius={narrow ? 80 : 110}
+            outerRadius={narrow ? 80 : 95}
             paddingAngle={2}
             dataKey="total"
             nameKey="categoryName"
+            isAnimationActive={false}
             cursor={onCategoryClick ? "pointer" : "default"}
             onClick={(_, index) => {
               if (!onCategoryClick) return;
