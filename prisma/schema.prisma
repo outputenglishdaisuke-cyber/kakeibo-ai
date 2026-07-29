@@ -20,6 +20,7 @@ model Category {
   updatedAt    DateTime      @updatedAt
   transactions Transaction[]
   rules        Rule[]
+  budget       CategoryBudget?
 }
 
 model Transaction {
@@ -56,6 +57,18 @@ model AppSetting {
   key       String   @id
   value     Json
   updatedAt DateTime @updatedAt
+}
+
+/** 月次のカテゴリ別予算。行がないカテゴリ（家賃など）は予算比較の対象外 */
+model CategoryBudget {
+  categoryId   String   @id
+  category     Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  targetAmount Int
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([sortOrder])
 }
 
 enum Source {

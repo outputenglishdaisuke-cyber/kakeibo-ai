@@ -7,6 +7,7 @@ import { ExpensePieChart } from "@/components/charts/ExpensePieChart";
 import { MonthlyTrendChart } from "@/components/charts/MonthlyTrendChart";
 import { CategoryMonthlyMatrixTable } from "@/components/charts/CategoryMonthlyMatrixTable";
 import { DashboardGrid } from "@/components/dashboard/DashboardGrid";
+import { BudgetPerformanceTable } from "@/components/dashboard/BudgetPerformanceTable";
 import { formatCurrency, getMonthKey } from "@/lib/utils";
 import { buildTransactionsFilterUrl } from "@/lib/transactions-url";
 import type { CategorySummary } from "@/types";
@@ -126,6 +127,7 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         ),
+        budget: <BudgetPerformanceTable month={currentMonth} />,
         matrix: <CategoryMonthlyMatrixTable className="h-full" />,
       };
     }
@@ -264,6 +266,7 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       ),
+      budget: <BudgetPerformanceTable month={currentMonth} />,
       matrix: <CategoryMonthlyMatrixTable className="h-full" />,
     };
   }, [
@@ -273,6 +276,7 @@ export default function DashboardPage() {
     sortedCategories,
     topCategoryName,
     goToCategoryTransactions,
+    currentMonth,
   ]);
 
   return (
