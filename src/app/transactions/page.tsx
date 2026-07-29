@@ -88,6 +88,8 @@ function TransactionsPageInner() {
   const [deleting, setDeleting] = useState(false);
   /** URL→state 反映中は state→URL 書き戻しを抑止 */
   const applyingFromUrl = useRef(false);
+  /** 古いリクエストが最新の loading 状態を上書きしないための連番 */
+  const transactionRequestId = useRef(0);
 
   const hasActiveFilters =
     selectedCategoryKeys.length > 0 || selectedSources.length > 0;
@@ -168,7 +170,28 @@ function TransactionsPageInner() {
     });
   }, [selectedCategoryKeys, categories]);
 
+  // カテゴリ一覧は画面表示時に一度だけ取得する。
+  // 取引取得と一緒に setCategories すると categoryKeysForApi が毎回変わり、
+  // fetchAll の再生成 → 再取得が無限に連鎖していた。
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/categories")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data)) setCategories(data);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMessage({ type: "error", text: "カテゴリ一覧の取得に失敗しました" });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const fetchAll = useCallback(async (opts?: { silent?: boolean }) => {
+    const requestId = ++transactionRequestId.current;
     if (!opts?.silent) setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -180,15 +203,18 @@ function TransactionsPageInner() {
         params.set("sources", selectedSources.join(","));
       }
 
-      const [txRes, catRes] = await Promise.all([
-        fetch(`/api/transactions?${params.toString()}`),
-        fetch("/api/categories"),
-      ]);
-      if (txRes.ok) setTransactions(await txRes.json());
-      if (catRes.ok) setCategories(await catRes.json());
+      const txRes = await fetch(`/api/transactions?${params.toString()}`);
+      if (!txRes.ok) throw new Error("transactions fetch failed");
+      const data = await txRes.json();
+      if (requestId !== transactionRequestId.current) return;
+      setTransactions(Array.isArray(data) ? data : []);
       if (!opts?.silent) setSelectedIds(new Set());
+    } catch {
+      if (requestId === transactionRequestId.current) {
+        setMessage({ type: "error", text: "取引一覧の取得に失敗しました" });
+      }
     } finally {
-      if (!opts?.silent) setLoading(false);
+      if (requestId === transactionRequestId.current) setLoading(false);
     }
   }, [currentMonth, categoryKeysForApi, selectedSources]);
 
