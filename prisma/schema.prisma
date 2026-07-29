@@ -38,6 +38,7 @@ model Transaction {
 
   @@index([date])
   @@index([categoryId])
+  @@unique([date, description, amount])
 }
 
 model Rule {

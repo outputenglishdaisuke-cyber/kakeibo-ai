@@ -6,7 +6,7 @@ import { z } from "zod";
 
 const transactionSchema = z.object({
   date: z.string().min(1),
-  description: z.string().min(1),
+  description: z.string().trim().min(1),
   amount: z
     .number()
     .int()
@@ -102,7 +102,10 @@ export async function POST(req: NextRequest) {
         categoryId: tx.categoryId,
         confirmed: true,
       })),
+      // DB の複合一意制約と併用し、既存DB・同一リクエスト内の重複を除外する。
+      skipDuplicates: true,
     });
+    const skippedCount = finalized.length - created.length;
 
     const withCategory = created.map((tx) => ({
       ...tx,
@@ -110,7 +113,11 @@ export async function POST(req: NextRequest) {
     }));
 
     return NextResponse.json(
-      { count: created.length, transactions: withCategory },
+      {
+        count: created.length,
+        skippedCount,
+        transactions: withCategory,
+      },
       { status: 201 }
     );
   } catch (err) {

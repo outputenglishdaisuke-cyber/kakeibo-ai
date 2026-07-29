@@ -6,7 +6,7 @@ import type { Prisma, Source } from "@/generated/prisma";
 
 const createSchema = z.object({
   date: z.string(),
-  description: z.string().min(1),
+  description: z.string().trim().min(1),
   amount: z.number().int().positive(),
   categoryId: z.string().optional().nullable(),
   source: z.enum(["CSV", "MANUAL", "IMAGE"]).default("MANUAL"),
@@ -15,6 +15,15 @@ const createSchema = z.object({
 });
 
 const VALID_SOURCES = new Set(["CSV", "MANUAL", "IMAGE"]);
+
+function isUniqueConstraintError(error: unknown): error is { code: string } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "P2002"
+  );
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -73,19 +82,30 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const parsed = createSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  try {
+    const body = await req.json();
+    const parsed = createSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    }
+
+    const transaction = await prisma.transaction.create({
+      data: {
+        ...parsed.data,
+        date: new Date(parsed.data.date),
+      },
+      include: { category: true },
+    });
+
+    return NextResponse.json(transaction, { status: 201 });
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return NextResponse.json(
+        { error: "同じ日付・店名・金額の明細がすでに登録されています" },
+        { status: 409 }
+      );
+    }
+    console.error("[/api/transactions] POST failed:", error);
+    return NextResponse.json({ error: "保存に失敗しました" }, { status: 500 });
   }
-
-  const transaction = await prisma.transaction.create({
-    data: {
-      ...parsed.data,
-      date: new Date(parsed.data.date),
-    },
-    include: { category: true },
-  });
-
-  return NextResponse.json(transaction, { status: 201 });
 }

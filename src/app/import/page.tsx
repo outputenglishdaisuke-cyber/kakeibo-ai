@@ -379,7 +379,15 @@ export default function ImportPage() {
         return;
       }
       const data = await res.json();
-      setMessage({ type: "success", text: `${data.count}件の取引を保存しました` });
+      const skippedCount =
+        typeof data.skippedCount === "number" ? data.skippedCount : 0;
+      setMessage({
+        type: "success",
+        text:
+          skippedCount > 0
+            ? `${data.count}件を保存し、重複${skippedCount}件を除外しました`
+            : `${data.count}件の取引を保存しました`,
+      });
       setParsed([]);
       setFailures([]);
       setCsvFiles([]);
