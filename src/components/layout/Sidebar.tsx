@@ -57,8 +57,14 @@ export function Sidebar() {
       </aside>
 
       {/* スマホ: 下部固定タブバー */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-gray-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden">
-        <div className="flex items-stretch justify-around">
+      <nav
+        className={cn(
+          "fixed bottom-0 left-0 right-0 z-40 border-t border-gray-200 bg-white md:hidden",
+          "px-3 pt-1.5",
+          "pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+        )}
+      >
+        <div className="mx-auto flex max-w-lg items-stretch justify-between gap-1">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = isActive(pathname, item.href);
@@ -67,12 +73,14 @@ export function Sidebar() {
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex min-h-[56px] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-1 py-2 text-[10px] font-medium transition-colors",
-                  active ? "text-indigo-600" : "text-gray-500"
+                  "flex min-h-11 min-w-11 flex-1 flex-col items-center justify-center gap-1 rounded-xl px-1.5 py-2 text-xs font-medium transition-colors",
+                  active
+                    ? "bg-indigo-50 text-indigo-600"
+                    : "text-gray-500 active:bg-gray-50"
                 )}
               >
-                <Icon className={cn("h-5 w-5", active && "text-indigo-600")} />
-                <span className="truncate">{item.shortLabel}</span>
+                <Icon className={cn("h-6 w-6", active && "text-indigo-600")} />
+                <span className="leading-none">{item.shortLabel}</span>
               </Link>
             );
           })}

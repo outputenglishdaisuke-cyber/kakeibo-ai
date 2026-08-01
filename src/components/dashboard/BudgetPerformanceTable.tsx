@@ -34,6 +34,34 @@ function differenceClass(amount: number) {
   return "font-semibold text-gray-500";
 }
 
+function CategoryLabel({
+  name,
+  color,
+  bold = false,
+}: {
+  name: string;
+  color?: string;
+  bold?: boolean;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex min-w-0 items-center gap-1.5 sm:gap-2",
+        bold ? "font-bold" : "font-medium"
+      )}
+    >
+      {color ? (
+        <span
+          className="h-2 w-2 flex-shrink-0 rounded-full sm:h-2.5 sm:w-2.5"
+          style={{ backgroundColor: color }}
+          aria-hidden
+        />
+      ) : null}
+      <span className="truncate">{name}</span>
+    </span>
+  );
+}
+
 export function BudgetPerformanceTable({
   month,
   className,
@@ -89,70 +117,121 @@ export function BudgetPerformanceTable({
             {error}
           </div>
         ) : !data ? null : (
-          <div className="overflow-x-auto rounded-lg border border-gray-200">
-            <table className="w-full min-w-[560px] text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 bg-gray-50 text-gray-600">
-                  <th className="px-4 py-2.5 text-left font-medium">カテゴリ</th>
-                  <th className="px-4 py-2.5 text-right font-medium">目標</th>
-                  <th className="px-4 py-2.5 text-right font-medium">実績</th>
-                  <th className="px-4 py-2.5 text-right font-medium">
-                    目標との差
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
+          <>
+            {/* スマホ: 横スクロールなしのコンパクト表示 */}
+            <div className="overflow-hidden rounded-lg border border-gray-200 sm:hidden">
+              <ul className="divide-y divide-gray-100 text-[12px] leading-snug">
                 {data.rows.map((row) => (
-                  <tr key={row.categoryId} className="hover:bg-gray-50">
-                    <td className="px-4 py-2.5">
-                      <span className="inline-flex items-center gap-2 font-medium">
-                        <span
-                          className="h-2.5 w-2.5 rounded-full"
-                          style={{ backgroundColor: row.color }}
-                          aria-hidden
+                  <li
+                    key={row.categoryId}
+                    className="flex items-start justify-between gap-3 px-3 py-2.5"
+                  >
+                    <div className="min-w-0 pt-0.5">
+                      <CategoryLabel
+                        name={row.categoryName}
+                        color={row.color}
+                      />
+                    </div>
+                    <div className="flex-shrink-0 text-right tabular-nums">
+                      <div className="text-gray-700">
+                        <span className="text-gray-400">目標 </span>
+                        {formatCurrency(row.targetAmount)}
+                      </div>
+                      <div className="text-gray-700">
+                        <span className="text-gray-400">実績 </span>
+                        {formatCurrency(row.actualAmount)}
+                      </div>
+                      <div className={cn("mt-0.5", differenceClass(row.difference))}>
+                        {formatDifference(row.difference)}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+                <li className="flex items-start justify-between gap-3 bg-gray-50 px-3 py-2.5">
+                  <div className="pt-0.5 font-bold">合計</div>
+                  <div className="flex-shrink-0 text-right tabular-nums">
+                    <div className="font-bold text-gray-900">
+                      <span className="font-normal text-gray-400">目標 </span>
+                      {formatCurrency(data.totals.targetAmount)}
+                    </div>
+                    <div className="font-bold text-gray-900">
+                      <span className="font-normal text-gray-400">実績 </span>
+                      {formatCurrency(data.totals.actualAmount)}
+                    </div>
+                    <div
+                      className={cn(
+                        "mt-0.5",
+                        differenceClass(data.totals.difference)
+                      )}
+                    >
+                      {formatDifference(data.totals.difference)}
+                    </div>
+                  </div>
+                </li>
+              </ul>
+            </div>
+
+            {/* PC: 従来の表レイアウト */}
+            <div className="hidden overflow-x-auto rounded-lg border border-gray-200 sm:block">
+              <table className="w-full min-w-[560px] text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 bg-gray-50 text-gray-600">
+                    <th className="px-4 py-2.5 text-left font-medium">カテゴリ</th>
+                    <th className="px-4 py-2.5 text-right font-medium">目標</th>
+                    <th className="px-4 py-2.5 text-right font-medium">実績</th>
+                    <th className="px-4 py-2.5 text-right font-medium">
+                      目標との差
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {data.rows.map((row) => (
+                    <tr key={row.categoryId} className="hover:bg-gray-50">
+                      <td className="px-4 py-2.5">
+                        <CategoryLabel
+                          name={row.categoryName}
+                          color={row.color}
                         />
-                        {row.categoryName}
-                      </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        {formatCurrency(row.targetAmount)}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        {formatCurrency(row.actualAmount)}
+                      </td>
+                      <td
+                        className={cn(
+                          "px-4 py-2.5 text-right tabular-nums",
+                          differenceClass(row.difference)
+                        )}
+                      >
+                        {formatDifference(row.difference)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="border-t-2 border-gray-300 bg-gray-50">
+                    <td className="px-4 py-2.5 font-bold">合計</td>
+                    <td className="px-4 py-2.5 text-right font-bold tabular-nums">
+                      {formatCurrency(data.totals.targetAmount)}
                     </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      {formatCurrency(row.targetAmount)}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      {formatCurrency(row.actualAmount)}
+                    <td className="px-4 py-2.5 text-right font-bold tabular-nums">
+                      {formatCurrency(data.totals.actualAmount)}
                     </td>
                     <td
                       className={cn(
                         "px-4 py-2.5 text-right tabular-nums",
-                        differenceClass(row.difference)
+                        differenceClass(data.totals.difference)
                       )}
                     >
-                      {formatDifference(row.difference)}
+                      {formatDifference(data.totals.difference)}
                     </td>
                   </tr>
-                ))}
-                <tr className="border-t-2 border-gray-300 bg-gray-50">
-                  <td className="px-4 py-2.5 font-bold">合計</td>
-                  <td className="px-4 py-2.5 text-right font-bold tabular-nums">
-                    {formatCurrency(data.totals.targetAmount)}
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-bold tabular-nums">
-                    {formatCurrency(data.totals.actualAmount)}
-                  </td>
-                  <td
-                    className={cn(
-                      "px-4 py-2.5 text-right tabular-nums",
-                      differenceClass(data.totals.difference)
-                    )}
-                  >
-                    {formatDifference(data.totals.difference)}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </CardContent>
     </Card>
   );
 }
-
