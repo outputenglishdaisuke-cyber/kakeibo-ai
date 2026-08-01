@@ -643,7 +643,6 @@ export default function ImportPage() {
                   type="file"
                   accept="image/*"
                   multiple
-                  capture="environment"
                   className="hidden"
                   onChange={(e) => {
                     setImageFiles(collectFiles(e.target.files, isImageFile));
