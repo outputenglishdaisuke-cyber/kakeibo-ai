@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { classifyParsedTransactions } from "@/lib/classify-pipeline";
 import { ensureDefaultCategories } from "@/lib/default-categories";
+import { aggregateSameCategoryReceipts } from "@/lib/receipt-aggregation";
 import { z } from "zod";
 
 const transactionSchema = z.object({
@@ -13,6 +14,12 @@ const transactionSchema = z.object({
     .refine((n) => n !== 0, { message: "amount must be non-zero" }),
   source: z.enum(["CSV", "MANUAL", "IMAGE"]).default("CSV"),
   categoryId: z.string().nullable().optional(),
+  categoryName: z.string().nullable().optional(),
+  categoryColor: z.string().nullable().optional(),
+  receiptGroupId: z.string().nullable().optional(),
+  storeName: z.string().nullable().optional(),
+  itemName: z.string().nullable().optional(),
+  memo: z.string().nullable().optional(),
 });
 
 const confirmSchema = z.object({
@@ -23,7 +30,9 @@ const confirmSchema = z.object({
 function parseDate(raw: string): Date | null {
   const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (iso) {
-    const d = new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])));
+    const d = new Date(
+      Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))
+    );
     return Number.isNaN(d.getTime()) ? null : d;
   }
   const d = new Date(raw);
@@ -33,6 +42,7 @@ function parseDate(raw: string): Date | null {
 /**
  * 確認済みの取引を DB に保存する。
  * クライアント側で選んだ categoryId を優先し、未設定ならルール → AI で補完する。
+ * 同一レシートで全品が同一カテゴリなら店名＋合計の1件にまとめ、品目内訳は memo に残す。
  */
 export async function POST(req: NextRequest) {
   try {
@@ -51,7 +61,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error: "日付の形式が不正な明細があります",
-          samples: invalidDates.slice(0, 5).map((x) => ({ index: x.i, date: x.date })),
+          samples: invalidDates
+            .slice(0, 5)
+            .map((x) => ({ index: x.i, date: x.date })),
         },
         { status: 400 }
       );
@@ -61,14 +73,18 @@ export async function POST(req: NextRequest) {
     const categoryIdSet = new Set(categories.map((c) => c.id));
     const categoryById = new Map(categories.map((c) => [c.id, c]));
 
-    // クライアント指定の categoryId を検証
-    const withClientCategory = transactions.map((tx) => ({
-      ...tx,
-      categoryId:
-        tx.categoryId && categoryIdSet.has(tx.categoryId) ? tx.categoryId : null,
-    }));
+    const withClientCategory = transactions.map((tx) => {
+      const categoryId =
+        tx.categoryId && categoryIdSet.has(tx.categoryId) ? tx.categoryId : null;
+      const cat = categoryId ? categoryById.get(categoryId) : null;
+      return {
+        ...tx,
+        categoryId,
+        categoryName: cat?.name ?? tx.categoryName ?? null,
+        categoryColor: cat?.color ?? tx.categoryColor ?? null,
+      };
+    });
 
-    // 未分類のみルール → AI
     const needClassify = withClientCategory.some((tx) => tx.categoryId === null);
     let finalized = withClientCategory;
 
@@ -86,26 +102,34 @@ export async function POST(req: NextRequest) {
       finalized = withClientCategory.map((tx, i) => {
         if (tx.categoryId) return tx;
         const c = classified[i];
+        const cat = c?.categoryId ? categoryById.get(c.categoryId) : null;
         return {
           ...tx,
           categoryId: c?.categoryId ?? null,
+          categoryName: cat?.name ?? c?.categoryName ?? null,
+          categoryColor: cat?.color ?? null,
         };
       });
     }
 
+    const inputCount = finalized.length;
+    const toSave = aggregateSameCategoryReceipts(finalized);
+    const aggregatedCount = inputCount - toSave.length;
+
     const created = await prisma.transaction.createManyAndReturn({
-      data: finalized.map((tx) => ({
+      data: toSave.map((tx) => ({
         date: parseDate(tx.date)!,
         description: tx.description,
         amount: tx.amount,
         source: tx.source,
         categoryId: tx.categoryId,
+        memo: tx.memo ?? null,
         confirmed: true,
       })),
       // DB の複合一意制約と併用し、既存DB・同一リクエスト内の重複を除外する。
       skipDuplicates: true,
     });
-    const skippedCount = finalized.length - created.length;
+    const skippedCount = toSave.length - created.length;
 
     const withCategory = created.map((tx) => ({
       ...tx,
@@ -116,6 +140,8 @@ export async function POST(req: NextRequest) {
       {
         count: created.length,
         skippedCount,
+        inputCount,
+        aggregatedCount: Math.max(0, aggregatedCount),
         transactions: withCategory,
       },
       { status: 201 }

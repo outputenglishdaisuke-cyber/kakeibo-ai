@@ -30,6 +30,7 @@ import {
   Filter,
   RotateCcw,
 } from "lucide-react";
+import { ReceiptItemsDisclosure } from "@/components/transactions/ReceiptItemsDisclosure";
 
 const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
   { value: "CSV", label: "CSV" },
@@ -702,8 +703,9 @@ function TransactionsPageInner() {
                         <td className="py-3 pr-4 text-gray-600">
                           {formatDate(tx.date)}
                         </td>
-                        <td className="max-w-[200px] truncate py-3 pr-4 font-medium">
-                          {tx.description}
+                        <td className="max-w-[240px] py-3 pr-4 font-medium">
+                          <div className="truncate">{tx.description}</div>
+                          <ReceiptItemsDisclosure memo={tx.memo} className="mt-1" />
                         </td>
                         <td className="py-3 pr-4 text-right font-medium">
                           {formatCurrency(tx.amount)}
@@ -767,6 +769,10 @@ function TransactionsPageInner() {
                             <p className="mt-1 truncate text-base font-medium text-gray-900">
                               {tx.description}
                             </p>
+                            <ReceiptItemsDisclosure
+                              memo={tx.memo}
+                              className="mt-1"
+                            />
                           </div>
                           <p className="flex-shrink-0 text-base font-bold text-gray-900">
                             {formatCurrency(tx.amount)}

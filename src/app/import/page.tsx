@@ -7,6 +7,11 @@ import { CategorySelect } from "@/components/ui/category-select";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Category, ParsedTransaction } from "@/types";
 import {
+  aggregateSameCategoryReceipts,
+  planReceiptGroup,
+  type ReceiptGroupPlan,
+} from "@/lib/receipt-aggregation";
+import {
   Upload,
   FileText,
   Camera,
@@ -37,12 +42,28 @@ type ConfirmRow =
   | {
       kind: "group-header";
       key: string;
+      receiptGroupId: string;
       storeName: string;
       date: string;
       itemCount: number;
       totalAmount: number;
+      plan: ReceiptGroupPlan;
     }
   | { kind: "item"; key: string; tx: ParsedTransaction; index: number };
+
+function planLabel(plan: ReceiptGroupPlan): string {
+  if (plan.mode === "aggregate") {
+    const cat = plan.categoryName ? `（${plan.categoryName}）` : "";
+    return `保存時は店名＋合計の1件にまとめます${cat}`;
+  }
+  if (plan.reason === "uncategorized") {
+    return "未分類の品目があるため、商品ごとに登録します";
+  }
+  if (plan.reason === "mixed_categories") {
+    return "カテゴリが複数あるため、商品ごとに登録します";
+  }
+  return "商品ごとに登録します";
+}
 
 const PAGE_SIZE = 50;
 
@@ -84,17 +105,16 @@ function buildConfirmRows(items: ParsedTransaction[]): ConfirmRow[] {
       while (j < items.length && items[j].receiptGroupId === groupId) j += 1;
       const group = items.slice(i, j);
       if (group.length > 1) {
-        const storeName =
-          group.find((g) => g.storeName)?.storeName ||
-          group[0].description.split(" / ")[0] ||
-          "レシート";
+        const plan = planReceiptGroup(group);
         rows.push({
           kind: "group-header",
           key: `hdr-${groupId}`,
-          storeName,
+          receiptGroupId: groupId,
+          storeName: plan.storeName,
           date: group[0].date,
           itemCount: group.length,
-          totalAmount: group.reduce((s, g) => s + g.amount, 0),
+          totalAmount: plan.totalAmount,
+          plan,
         });
       }
       for (let k = i; k < j; k++) {
@@ -151,6 +171,11 @@ export default function ImportPage() {
   const confirmRows = useMemo(
     () => buildConfirmRows(pagedParsed),
     [pagedParsed]
+  );
+
+  const savePreviewCount = useMemo(
+    () => aggregateSameCategoryReceipts(parsed).length,
+    [parsed]
   );
 
   /** ページ先頭オフセットを加味したグローバル index */
@@ -381,12 +406,20 @@ export default function ImportPage() {
       const data = await res.json();
       const skippedCount =
         typeof data.skippedCount === "number" ? data.skippedCount : 0;
+      const aggregatedCount =
+        typeof data.aggregatedCount === "number" ? data.aggregatedCount : 0;
+      const parts = [`${data.count}件の取引を保存しました`];
+      if (aggregatedCount > 0) {
+        parts.push(
+          `同一カテゴリのレシート品目をまとめ、確認${data.inputCount ?? parsed.length}件→保存${data.count + skippedCount}件相当に圧縮`
+        );
+      }
+      if (skippedCount > 0) {
+        parts.push(`重複${skippedCount}件を除外`);
+      }
       setMessage({
         type: "success",
-        text:
-          skippedCount > 0
-            ? `${data.count}件を保存し、重複${skippedCount}件を除外しました`
-            : `${data.count}件の取引を保存しました`,
+        text: parts.join("。"),
       });
       setParsed([]);
       setFailures([]);
@@ -618,6 +651,7 @@ export default function ImportPage() {
             <div className="space-y-4">
               <p className="text-sm text-gray-500">
                 レシートや利用明細の画像を複数選択できます。レシートは品目ごとに分割・分類し、
+                保存時に全品が同一カテゴリなら店名＋合計の1件にまとめます。
                 品目が読めない場合は店名ベースの1件として扱います。1枚ずつ順に解析します。
               </p>
               <label
@@ -710,13 +744,15 @@ export default function ImportPage() {
                 >
                   {saving
                     ? "保存中..."
-                    : `全て確定してDBに保存（${parsed.length}件）`}
+                    : savePreviewCount === parsed.length
+                      ? `全て確定してDBに保存（${parsed.length}件）`
+                      : `全て確定してDBに保存（確認${parsed.length}件 → 保存約${savePreviewCount}件）`}
                 </Button>
               </div>
             </div>
             <p className="mt-1 text-sm text-gray-500">
               AIがカテゴリを自動提案しています（{classifiedCount}/{parsed.length}件に分類済み）。
-              プルダウンでその場で変更できます。同一レシートから分割された品目はグループ表示されます。
+              プルダウンでその場で変更できます。同一レシートの全品が同じカテゴリなら、保存時に店名＋合計の1件にまとめます（品目内訳は内部保持）。
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -751,6 +787,15 @@ export default function ImportPage() {
                                 </span>
                                 <span className="text-xs text-indigo-700">
                                   小計 {formatCurrency(row.totalAmount)}
+                                </span>
+                                <span
+                                  className={`rounded-full px-2 py-0.5 text-xs ${
+                                    row.plan.mode === "aggregate"
+                                      ? "bg-emerald-100 text-emerald-800"
+                                      : "bg-amber-100 text-amber-900"
+                                  }`}
+                                >
+                                  {planLabel(row.plan)}
                                 </span>
                               </div>
                             </td>
@@ -830,6 +875,15 @@ export default function ImportPage() {
                         <p className="mt-1 text-xs text-indigo-700">
                           {formatDate(row.date)} ・ {row.itemCount}品目 ・ 小計{" "}
                           {formatCurrency(row.totalAmount)}
+                        </p>
+                        <p
+                          className={`mt-2 text-xs ${
+                            row.plan.mode === "aggregate"
+                              ? "text-emerald-800"
+                              : "text-amber-900"
+                          }`}
+                        >
+                          {planLabel(row.plan)}
                         </p>
                       </div>
                     );
