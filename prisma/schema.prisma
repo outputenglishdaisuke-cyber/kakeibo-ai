@@ -33,11 +33,14 @@ model Transaction {
   source      Source    @default(MANUAL)
   memo        String?
   confirmed   Boolean   @default(false)
+  /** レシート集約で親に取り込まれた旧品目行。一覧・集計から除外 */
+  archived    Boolean   @default(false)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   @@index([date])
   @@index([categoryId])
+  @@index([archived])
   @@unique([date, description, amount])
 }
 

@@ -10,6 +10,8 @@ export interface ReceiptItemsMemo {
     amount: number;
     categoryId?: string | null;
     categoryName?: string | null;
+    /** 移行時に退避した元 Transaction.id */
+    originalId?: string;
   }>;
 }
 

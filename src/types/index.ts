@@ -20,6 +20,7 @@ export interface Transaction {
   source: Source;
   memo?: string | null;
   confirmed: boolean;
+  archived?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }

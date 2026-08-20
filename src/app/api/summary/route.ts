@@ -6,6 +6,7 @@ import {
   recentMonthRange,
 } from "@/lib/utils";
 import type { CategoryMonthMatrix, CategoryMonthMatrixRow } from "@/types";
+import { withActiveTransactions } from "@/lib/transaction-visibility";
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
 const MAX_RANGE_MONTHS = 120;
@@ -52,7 +53,10 @@ export async function GET(req: NextRequest) {
   if (month) {
     const { start, end } = getMonthRange(month);
     const transactions = await prisma.transaction.findMany({
-      where: { date: { gte: start, lte: end }, confirmed: true },
+      where: withActiveTransactions({
+        date: { gte: start, lte: end },
+        confirmed: true,
+      }),
       include: { category: true },
     });
 
@@ -97,7 +101,10 @@ export async function GET(req: NextRequest) {
 
     // 範囲内を1クエリで取得して月別に集計
     const txs = await prisma.transaction.findMany({
-      where: { date: { gte: start, lte: end }, confirmed: true },
+      where: withActiveTransactions({
+        date: { gte: start, lte: end },
+        confirmed: true,
+      }),
       select: { date: true, amount: true },
     });
 
@@ -132,7 +139,10 @@ async function buildCategoryMonthMatrix(
   const [allCategories, txs] = await Promise.all([
     prisma.category.findMany({ orderBy: { name: "asc" } }),
     prisma.transaction.findMany({
-      where: { date: { gte: start, lte: end }, confirmed: true },
+      where: withActiveTransactions({
+        date: { gte: start, lte: end },
+        confirmed: true,
+      }),
       select: {
         date: true,
         amount: true,

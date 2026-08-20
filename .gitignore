@@ -45,3 +45,6 @@ next-env.d.ts
 
 # local test fixtures
 /tmp/
+
+# DB export backups (contain personal finance data)
+/backups/

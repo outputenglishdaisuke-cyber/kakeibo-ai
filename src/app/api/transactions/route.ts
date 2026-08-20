@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { getMonthRange } from "@/lib/utils";
+import { withActiveTransactions } from "@/lib/transaction-visibility";
 import type { Prisma, Source } from "@/generated/prisma";
 
 const createSchema = z.object({
@@ -73,7 +74,7 @@ export async function GET(req: NextRequest) {
   }
 
   const transactions = await prisma.transaction.findMany({
-    where,
+    where: withActiveTransactions(where),
     include: { category: true },
     orderBy: { date: "desc" },
   });
