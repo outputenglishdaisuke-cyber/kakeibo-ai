@@ -1,4 +1,5 @@
 import { anthropic, MODEL } from "@/lib/anthropic";
+import { normalizeDate } from "@/lib/csv-parser";
 import type {
   Category,
   ClassificationResult,
@@ -262,7 +263,9 @@ suggestedCategoryId には上記の id を正確にコピーしてください�
 export async function extractTransactionsFromImage(
   base64Image: string,
   mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-  categories: Category[] = []
+  categories: Category[] = [],
+  /** 年の無い日付の年を決める基準日（実行日） */
+  referenceDate: Date = new Date()
 ): Promise<ExtractedImageTransaction[]> {
   const categoryNames = categories.map((c) => c.name);
   const categoryListText =
@@ -311,15 +314,17 @@ ${categoryListText}
 1. スーパー・コンビニ等のレシートで品目と金額が読める場合
    - 各購入品目を1件ずつ出力する
    - storeName は店名、itemName は商品名、description は「店名 / 商品名」
-   - 税・ポイント・値引・小計・合計行は品目に含めない（値引行は負の amount でも可だが、合計行は出さない）
+   - 税・ポイント・小計・合計行は品目に含めない（値引行は負の amount でも可だが、合計行は出さない）
+   - 品目の amount はレシートに印字された金額のまま（税抜表示の店でも税込に直さない）
+   - receiptTotal にレシートの支払合計（税込。「合計」「お買上計」「お支払」など実際に支払った金額）を入れる。同じレシートの品目はすべて同じ値
    - 例: 牛乳・食パン → 食費、洗剤・ティッシュ → 日用品、弁当・総菜で外食寄りのものは外食費でも可（迷ったら食費）
 2. 品目内訳が読めず合計金額しか分からない場合
    - itemsReadable 相当として 1件だけ返す
-   - description / storeName に店名、itemName は null、amount は合計金額
+   - description / storeName に店名、itemName は null、amount は合計金額（税込）、receiptTotal も同じ値
    - 店名からカテゴリを推測（例: 飲食店 → 外食費、スーパー → 食費）
 3. クレジットカード／銀行の利用明細画像の場合
    - 各利用行を1件ずつ返す（storeName は加盟店名、itemName は null）
-   - description は加盟店名
+   - description は加盟店名、receiptTotal は null
 
 【出力形式】JSON 配列のみ（説明文不要）:
 [
@@ -330,7 +335,8 @@ ${categoryListText}
     "description": "表示用の説明（店名 / 品目 または 店名）",
     "amount": 1500,
     "categoryName": "食費",
-    "paymentMethod": "cash"
+    "paymentMethod": "cash",
+    "receiptTotal": 3240
   }
 ]
 
@@ -387,7 +393,8 @@ paymentMethod（レシートの支払方法。同じレシートの品目はす�
       const dateRaw = typeof row.date === "string" ? row.date.trim() : "";
       const date = /^\d{4}-\d{2}-\d{2}$/.test(dateRaw)
         ? dateRaw
-        : new Date().toISOString().slice(0, 10);
+        : normalizeDate(dateRaw, undefined, referenceDate) ??
+          referenceDate.toISOString().slice(0, 10);
 
       let categoryName: string | null =
         typeof row.categoryName === "string" ? row.categoryName.trim() : null;
@@ -411,6 +418,8 @@ paymentMethod（レシートの支払方法。同じレシートの品目はす�
         row.paymentMethod === "cash" || row.paymentMethod === "credit_card"
           ? row.paymentMethod
           : "unknown";
+      const total = Math.round(Number(row.receiptTotal));
+      const receiptTotal = Number.isFinite(total) && total > 0 ? total : null;
 
       return {
         date,
@@ -420,6 +429,7 @@ paymentMethod（レシートの支払方法。同じレシートの品目はす�
         itemName,
         categoryName,
         paymentMethod,
+        receiptTotal,
       };
     })
     .filter((x): x is ExtractedImageTransaction => x !== null);

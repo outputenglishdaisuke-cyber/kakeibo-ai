@@ -89,6 +89,12 @@ export interface ParsedTransaction {
   itemName?: string | null;
   /** レシートから読み取った支払方法（現金と分かれば cash） */
   paymentMethod?: PaymentMethod | null;
+  /** CSV取込: 元のファイル名（取込単位の記録用） */
+  importFileName?: string | null;
+  /** CSV取込: 支払月（YYYY-MM）。表示用で、月の判定には使わない */
+  paymentMonth?: string | null;
+  /** CSV取込: 列の位置の設定（csv-formats.ts の id） */
+  csvFormat?: string | null;
 }
 
 export type PaymentMethod = "credit_card" | "cash" | "unknown";
@@ -103,6 +109,8 @@ export interface ExtractedImageTransaction {
   paymentMethod?: PaymentMethod | null;
   /** AI が提案したカテゴリ名（候補に無い/未分類なら null） */
   categoryName?: string | null;
+  /** レシートの支払合計（税込・実際に支払った金額）。読めない・利用明細の画像なら null */
+  receiptTotal?: number | null;
 }
 
 // AI レスポンス

@@ -6,6 +6,8 @@ import {
   detectCsvStructure,
 } from "@/lib/csv-parser";
 import type { CsvStructureAnalysis } from "@/types";
+import { detectCardCsvFormat } from "@/lib/csv-formats";
+import { describeImportCoverage } from "@/lib/reconcile";
 import { decodeCsvBuffer, CsvEncodingError } from "@/lib/csv-encoding";
 import { analyzeCsvStructure } from "@/lib/classifiers";
 import { classifyParsedTransactions } from "@/lib/classify-pipeline";
@@ -51,20 +53,26 @@ export async function POST(req: NextRequest) {
     }
 
     const warnings: string[] = [];
+    // 列の位置が設定済みの形式ならそれを使い、AI には聞かない
+    const preset = detectCardCsvFormat(matrix);
     let structure: CsvStructureAnalysis;
-    try {
-      structure = await analyzeCsvStructure(buildCsvSampleForAi(matrix, 15));
-    } catch (err) {
-      console.warn("[/api/import] AI structure analysis failed:", err);
-      const detected = detectCsvStructure(matrix);
-      if (!detected) {
-        return NextResponse.json(
-          { error: `${STRUCTURE_ERROR}（AIが使えないため、自動推定も失敗しました）`, encoding },
-          { status: 422 }
-        );
+    if (preset) {
+      structure = preset.structure;
+    } else {
+      try {
+        structure = await analyzeCsvStructure(buildCsvSampleForAi(matrix, 15));
+      } catch (err) {
+        console.warn("[/api/import] AI structure analysis failed:", err);
+        const detected = detectCsvStructure(matrix);
+        if (!detected) {
+          return NextResponse.json(
+            { error: `${STRUCTURE_ERROR}（AIが使えないため、自動推定も失敗しました）`, encoding },
+            { status: 422 }
+          );
+        }
+        structure = detected;
+        warnings.push("AIが使えないため、CSVの列はセルの内容から推定しました");
       }
-      structure = detected;
-      warnings.push("AIが使えないため、CSVの列はセルの内容から推定しました");
     }
 
     const indicesInvalid =
@@ -103,10 +111,23 @@ export async function POST(req: NextRequest) {
     }
 
     // 個別ルール → AI 分類（デフォルトカテゴリが無ければ投入）
-    const transactions = await classifyParsedTransactions(rawTransactions, {
+    const classified = await classifyParsedTransactions(rawTransactions, {
       autoClassify: true,
       onAiError: () =>
         warnings.push("AIが使えないため、ルールに当てはまらない明細は未分類のままです"),
+    });
+    const paymentMonth = preset?.paymentMonth ?? null;
+    const csvFormat = preset?.format.id ?? null;
+    const transactions = classified.map((tx) => ({
+      ...tx,
+      importFileName: file.name,
+      paymentMonth,
+      csvFormat,
+    }));
+    const coverage = describeImportCoverage({
+      fileName: file.name,
+      paymentMonth,
+      dates: transactions.map((tx) => tx.date),
     });
 
     return NextResponse.json({
@@ -115,6 +136,9 @@ export async function POST(req: NextRequest) {
       structure,
       transactions,
       totalRows: matrix.length,
+      paymentMonth,
+      csvFormat,
+      coverage,
       warnings,
     });
   } catch (err) {

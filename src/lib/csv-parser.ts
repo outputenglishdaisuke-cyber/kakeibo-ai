@@ -78,13 +78,42 @@ export function parseAmount(raw: string): number | null {
   return negative ? -value : value;
 }
 
+function isoDate(y: number, m: number, d: number): string | null {
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) {
+    return null;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
 /**
  * 日付文字列を YYYY-MM-DD に正規化する。失敗時は null。
+ * referenceDate を渡すと、年の無い「M/D」「M月D日」も解釈する
+ * （referenceDate 以前で最も近い年。例: 基準日が 2027/1/5 なら 12/30 は 2026/12/30）。
  */
-export function normalizeDate(raw: string, _dateFormatHint?: string): string | null {
+export function normalizeDate(
+  raw: string,
+  _dateFormatHint?: string,
+  referenceDate?: Date
+): string | null {
   if (!raw?.trim()) return null;
   let s = toHalfWidth(raw.trim());
   s = s.replace(/年|月/g, "/").replace(/日/g, "");
+
+  if (referenceDate) {
+    const md = s.match(/^(\d{1,2})[\/\-.](\d{1,2})$/);
+    if (md) {
+      const ref = isoDate(
+        referenceDate.getFullYear(),
+        referenceDate.getMonth() + 1,
+        referenceDate.getDate()
+      )!;
+      const year = referenceDate.getFullYear();
+      const sameYear = isoDate(year, Number(md[1]), Number(md[2]));
+      if (sameYear && sameYear <= ref) return sameYear;
+      return isoDate(year - 1, Number(md[1]), Number(md[2]));
+    }
+  }
 
   // YYYY/M/D or YYYY-M-D
   let m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);

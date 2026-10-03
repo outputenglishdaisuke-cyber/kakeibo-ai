@@ -142,6 +142,7 @@ export default function ImportPage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [failures, setFailures] = useState<FileFailure[]>([]);
+  const [notices, setNotices] = useState<{ text: string; warning: boolean }[]>([]);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [page, setPage] = useState(1);
 
@@ -219,11 +220,13 @@ export default function ImportPage() {
     setLoading(true);
     setMessage(null);
     setFailures([]);
+    setNotices([]);
     setProgress({ kind: "csv", current: 0, total: files.length, detectedCount: 0 });
 
     const merged: ParsedTransaction[] = [];
     const errors: FileFailure[] = [];
     const warnings = new Set<string>();
+    const coverageTexts: { text: string; warning: boolean }[] = [];
     let detected = 0;
 
     for (let i = 0; i < files.length; i++) {
@@ -245,9 +248,16 @@ export default function ImportPage() {
           continue;
         }
         const txs: ParsedTransaction[] = (data.transactions ?? []).map(
-          (tx: ParsedTransaction) => ({ ...tx, source: "CSV" as const })
+          (tx: ParsedTransaction) => ({
+            ...tx,
+            source: "CSV" as const,
+            importFileName: tx.importFileName ?? file.name,
+          })
         );
         for (const w of data.warnings ?? []) warnings.add(w);
+        if (data.coverage?.message) {
+          coverageTexts.push({ text: data.coverage.message, warning: false });
+        }
         merged.push(...txs);
         detected += txs.length;
         setProgress({
@@ -263,6 +273,7 @@ export default function ImportPage() {
 
     if (merged.length > 0) appendTransactions(merged);
     setFailures(errors);
+    setNotices(coverageTexts);
     if (merged.length > 0) {
       setMessage({
         type: "success",
@@ -296,6 +307,7 @@ export default function ImportPage() {
 
     const merged: ParsedTransaction[] = [];
     const errors: FileFailure[] = [];
+    const imageNotices: { text: string; warning: boolean }[] = [];
     let detected = 0;
 
     // レート制限を避けるため画像は1枚ずつ順次処理
@@ -338,6 +350,9 @@ export default function ImportPage() {
           });
           continue;
         }
+        for (const w of data.warnings ?? []) {
+          imageNotices.push({ text: `${file.name}: ${w}`, warning: true });
+        }
         merged.push(...txs);
         detected += txs.length;
         setProgress({
@@ -353,6 +368,7 @@ export default function ImportPage() {
 
     if (merged.length > 0) appendTransactions(merged);
     setFailures(errors);
+    setNotices(imageNotices);
     if (merged.length > 0) {
       setMessage({
         type: "success",
@@ -436,6 +452,14 @@ export default function ImportPage() {
         type: "success",
         text: parts.join("。"),
       });
+      const coverageNotices: { message: string; warning: string | null }[] =
+        Array.isArray(data.coverageNotices) ? data.coverageNotices : [];
+      setNotices(
+        coverageNotices.flatMap((n) => [
+          { text: n.message, warning: false },
+          ...(n.warning ? [{ text: n.warning, warning: true }] : []),
+        ])
+      );
       setParsed([]);
       setFailures([]);
       setCsvFiles([]);
@@ -488,6 +512,23 @@ export default function ImportPage() {
           )}
           {message.text}
         </div>
+      )}
+
+      {notices.length > 0 && (
+        <ul className="space-y-2 text-sm">
+          {notices.map((n) => (
+            <li
+              key={n.text}
+              className={`break-words rounded-lg px-4 py-3 ${
+                n.warning
+                  ? "border border-amber-200 bg-amber-50 text-amber-800"
+                  : "border border-sky-200 bg-sky-50 text-sky-800"
+              }`}
+            >
+              {n.text}
+            </li>
+          ))}
+        </ul>
       )}
 
       {failures.length > 0 && (
@@ -668,6 +709,7 @@ export default function ImportPage() {
                 レシートや利用明細の画像を複数選択できます。レシートは品目ごとに分割・分類し、
                 保存時に全品が同一カテゴリなら店名＋合計の1件にまとめます。
                 品目が読めない場合は店名ベースの1件として扱います。1枚ずつ順に解析します。
+                税抜表示のレシートは「消費税」の行を加えて、カード明細と同じ税込の合計にそろえます。
               </p>
               <label
                 onDragOver={(e) => {

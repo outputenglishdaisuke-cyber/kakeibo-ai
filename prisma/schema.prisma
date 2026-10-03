@@ -58,6 +58,17 @@ model Transaction {
   rejectedCardIds  String[]        @default([])
   /** Unknown の削除（ソフト削除）。一覧・集計から除外 */
   deletedAt        DateTime?
+  /** レシート側: 未突合の理由 */
+  unmatchedReason  UnmatchedReason?
+  /** カード明細側: どのCSV取込に属するか */
+  importBatchId    String?
+  importBatch      CardImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  /** CSV取込の重複判定用。同じ日付・店名・金額の明細が同じCSVに複数ある場合の何件目か */
+  dupIndex         Int             @default(0)
+  /** 二重登録などで集計から外した理由。null 以外は一覧・集計・突合から除外（行は残し、null に戻せば元に戻る） */
+  excludedReason   String?
+  /** データ補正の履歴（元の値を含む）。scripts/data-corrections.ts の --revert で元に戻す */
+  corrections      Json?
 
   @@index([date])
   @@index([categoryId])
@@ -65,7 +76,26 @@ model Transaction {
   @@index([reconcileStatus])
   @@index([matchedCardId])
   @@index([receiptGroupId])
-  @@unique([date, description, amount])
+  @@index([importBatchId])
+  @@unique([date, description, amount, dupIndex])
+}
+
+/**
+ * カードCSVの取込1回分（ファイル単位）。
+ * 利用日の範囲は、含まれる明細の利用日から算出する（ファイル名・支払月からは算出しない）。
+ */
+model CardImportBatch {
+  id            String        @id @default(cuid())
+  fileName      String?
+  /** 列の位置の設定（csv-formats.ts の id）。AI・自動推定で読んだ場合は null */
+  format        String?
+  /** 支払月（YYYY-MM）。表示用で、月・期間の判定には使わない */
+  paymentMonth  String?
+  rowCount      Int           @default(0)
+  coverageStart DateTime?
+  coverageEnd   DateTime?
+  createdAt     DateTime      @default(now())
+  transactions  Transaction[]
 }
 
 /**
@@ -146,6 +176,12 @@ enum ReconcileStatus {
 enum CashSource {
   confirmed
   auto
+}
+
+/** no_csv_coverage=前後に取込済みのカード明細が無い、no_candidate=明細はあるが候補が無い */
+enum UnmatchedReason {
+  no_csv_coverage
+  no_candidate
 }
 
 enum StoreMatchVerdict {
