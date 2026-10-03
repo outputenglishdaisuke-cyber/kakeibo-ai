@@ -3,8 +3,13 @@ import { prisma } from "@/lib/prisma";
 import { classifyParsedTransactions } from "@/lib/classify-pipeline";
 import { ensureDefaultCategories } from "@/lib/default-categories";
 import { aggregateSameCategoryReceipts } from "@/lib/receipt-aggregation";
-import { initialReconcileFields } from "@/lib/reconcile";
+import {
+  assignDuplicateIndexes,
+  describeImportCoverage,
+  initialReconcileFields,
+} from "@/lib/reconcile";
 import { runReconciliation, type ReconcileRunResult } from "@/lib/reconcile-service";
+import type { Prisma } from "@/generated/prisma";
 import { z } from "zod";
 
 // CSV 取込後の店名判定で Web 検索つきの AI を呼ぶため長めに取る
@@ -26,6 +31,13 @@ const transactionSchema = z.object({
   itemName: z.string().nullable().optional(),
   memo: z.string().nullable().optional(),
   paymentMethod: z.enum(["credit_card", "cash", "unknown"]).nullable().optional(),
+  importFileName: z.string().nullable().optional(),
+  paymentMonth: z
+    .string()
+    .regex(/^\d{4}-\d{2}$/)
+    .nullable()
+    .optional(),
+  csvFormat: z.string().nullable().optional(),
 });
 
 const confirmSchema = z.object({
@@ -119,25 +131,88 @@ export async function POST(req: NextRequest) {
     }
 
     const inputCount = finalized.length;
-    const toSave = aggregateSameCategoryReceipts(finalized);
-    const aggregatedCount = inputCount - toSave.length;
+    const csvRows = finalized.filter((tx) => tx.source === "CSV");
+    const otherRows = aggregateSameCategoryReceipts(
+      finalized.filter((tx) => tx.source !== "CSV")
+    );
+    const aggregatedCount = inputCount - csvRows.length - otherRows.length;
 
-    const created = await prisma.transaction.createManyAndReturn({
-      data: toSave.map((tx) => ({
-        date: parseDate(tx.date)!,
-        description: tx.description,
-        amount: tx.amount,
-        source: tx.source,
-        categoryId: tx.categoryId,
-        memo: tx.memo ?? null,
-        confirmed: true,
-        receiptGroupId: tx.source === "CSV" ? null : tx.receiptGroupId ?? null,
-        ...initialReconcileFields(tx.source, tx.amount, tx.paymentMethod),
-      })),
-      // DB の複合一意制約と併用し、既存DB・同一リクエスト内の重複を除外する。
-      skipDuplicates: true,
+    // CSV はファイルごとに「同日・同店・同額の何件目か」を付け、同じ明細の重複取込だけを除外する
+    const csvByFile = new Map<string, typeof csvRows>();
+    for (const tx of csvRows) {
+      const key = tx.importFileName ?? "";
+      csvByFile.set(key, [...(csvByFile.get(key) ?? []), tx]);
+    }
+
+    const { created, batchIds } = await prisma.$transaction(async (db) => {
+      const batchIds: string[] = [];
+      const rows: Prisma.TransactionCreateManyInput[] = [];
+      for (const [fileName, fileRows] of csvByFile) {
+        const batch = await db.cardImportBatch.create({
+          data: {
+            fileName: fileName || null,
+            format: fileRows[0].csvFormat ?? null,
+            paymentMonth: fileRows[0].paymentMonth ?? null,
+          },
+        });
+        batchIds.push(batch.id);
+        for (const tx of assignDuplicateIndexes(fileRows)) {
+          rows.push({
+            date: parseDate(tx.date)!,
+            description: tx.description,
+            amount: tx.amount,
+            source: tx.source,
+            categoryId: tx.categoryId,
+            memo: tx.memo ?? null,
+            confirmed: true,
+            receiptGroupId: null,
+            importBatchId: batch.id,
+            dupIndex: tx.dupIndex,
+            ...initialReconcileFields(tx.source, tx.amount, tx.paymentMethod),
+          });
+        }
+      }
+      for (const tx of otherRows) {
+        rows.push({
+          date: parseDate(tx.date)!,
+          description: tx.description,
+          amount: tx.amount,
+          source: tx.source,
+          categoryId: tx.categoryId,
+          memo: tx.memo ?? null,
+          confirmed: true,
+          receiptGroupId: tx.receiptGroupId ?? null,
+          ...initialReconcileFields(tx.source, tx.amount, tx.paymentMethod),
+        });
+      }
+
+      const created = await db.transaction.createManyAndReturn({
+        data: rows,
+        // DB の複合一意制約と併用し、既存DB・同一リクエスト内の重複を除外する。
+        skipDuplicates: true,
+      });
+
+      for (const id of batchIds) {
+        const dates = created
+          .filter((tx) => tx.importBatchId === id)
+          .map((tx) => tx.date.getTime())
+          .sort((a, b) => a - b);
+        if (dates.length === 0) {
+          await db.cardImportBatch.delete({ where: { id } });
+          continue;
+        }
+        await db.cardImportBatch.update({
+          where: { id },
+          data: {
+            rowCount: dates.length,
+            coverageStart: new Date(dates[0]),
+            coverageEnd: new Date(dates[dates.length - 1]),
+          },
+        });
+      }
+      return { created, batchIds };
     });
-    const skippedCount = toSave.length - created.length;
+    const skippedCount = csvRows.length + otherRows.length - created.length;
 
     // CSV 取込完了時: 突合（AI 判定つき）→ 現金への自動判定。レシート保存時: 突合のみ。
     let reconcile: ReconcileRunResult | { error: string } | null = null;
@@ -158,6 +233,25 @@ export async function POST(req: NextRequest) {
       category: tx.categoryId ? categoryById.get(tx.categoryId) ?? null : null,
     }));
 
+    // 取込完了時: CSVの利用日の範囲と、未照合レシートの期間とのずれを知らせる
+    let coverageNotices: { fileName: string | null; message: string; warning: string | null }[] = [];
+    if (csvByFile.size > 0) {
+      const unmatchedReceipts = await prisma.transaction.findMany({
+        where: { source: { not: "CSV" }, reconcileStatus: "unmatched" },
+        select: { date: true },
+      });
+      const unmatchedReceiptDates = unmatchedReceipts.map((r) => r.date.toISOString().slice(0, 10));
+      coverageNotices = [...csvByFile].flatMap(([fileName, fileRows]) => {
+        const info = describeImportCoverage({
+          fileName: fileName || null,
+          paymentMonth: fileRows[0].paymentMonth ?? null,
+          dates: fileRows.map((tx) => tx.date),
+          unmatchedReceiptDates,
+        });
+        return info ? [{ fileName: fileName || null, message: info.message, warning: info.warning }] : [];
+      });
+    }
+
     return NextResponse.json(
       {
         count: created.length,
@@ -166,6 +260,8 @@ export async function POST(req: NextRequest) {
         aggregatedCount: Math.max(0, aggregatedCount),
         transactions: withCategory,
         reconcile,
+        importBatchIds: batchIds,
+        coverageNotices,
       },
       { status: 201 }
     );

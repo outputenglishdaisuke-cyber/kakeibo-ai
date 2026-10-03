@@ -5,19 +5,25 @@
 import type { Prisma, Transaction } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
 import {
+  addDays,
+  buildImportCoverages,
   buildReceiptUnits,
   buildReconcileSummary,
-  cardCoverage,
+  DEFAULT_MAX_DAYS,
   diffDays,
   finalizeUnmatchedReceiptsAsCash,
+  findOutOfRangeMatches,
+  isTaxInclusiveAmount,
+  LEGACY_BATCH_ID,
   matchCardAndReceipts,
   storeNameOf,
   toCardTransaction,
   type LedgerRow,
   type ReceiptUnit,
   type StoreJudge,
+  type UnmatchedReason,
 } from "@/lib/reconcile";
-import { compareStoreNames, normalizeStoreName } from "@/lib/store-name";
+import { normalizeStoreName, ruleBasedStoreVerdict } from "@/lib/store-name";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -42,6 +48,8 @@ export function toLedgerRow(tx: Transaction): LedgerRow {
     matchedCardId: tx.matchedCardId,
     autoCashExempt: tx.autoCashExempt,
     rejectedCardIds: tx.rejectedCardIds ?? [],
+    unmatchedReason: tx.unmatchedReason,
+    importBatchId: tx.importBatchId,
   };
 }
 
@@ -59,18 +67,28 @@ function judgementKey(cardName: string, receiptName: string) {
 
 type JudgementRow = Awaited<ReturnType<typeof prisma.storeMatchJudgement.findMany>>[number];
 
-async function loadJudgements(db: Db = prisma) {
-  const rows = await db.storeMatchJudgement.findMany();
-  return new Map(rows.map((r) => [`${r.cardName}\u0000${r.receiptName}`, r]));
+/** 保存済みの判定。正規化の規則が変わっても引けるよう、元の表記から毎回キーを作り直す */
+export async function loadJudgements(db: Db = prisma) {
+  const rows = await db.storeMatchJudgement.findMany({ orderBy: { updatedAt: "asc" } });
+  const map = new Map<string, JudgementRow>();
+  for (const r of rows) {
+    const key = judgementKey(r.cardSample, r.receiptSample);
+    if (map.get(key)?.source === "user" && r.source !== "user") continue;
+    map.set(key, r);
+  }
+  return map;
 }
 
-/** 正規化後に同じ名前なら同じ店。それ以外は保存済みの判定（ユーザー優先）、無ければ未判定 */
+/**
+ * 店名の判定の優先順: ユーザーが教えた判定 → 設定（別名辞書・施設名）と文字列の類似度 →
+ * AI の判定 → どれも無ければ未判定（CSV取込時に AI へ問い合わせる）。
+ */
 export function makeStoreJudge(judgements: Map<string, JudgementRow>): StoreJudge {
   return (cardName, receiptName) => {
-    const a = normalizeStoreName(cardName);
-    const b = normalizeStoreName(receiptName);
-    if (a && a === b) return "same";
-    const j = judgements.get(`${a}\u0000${b}`);
+    const j = judgements.get(judgementKey(cardName, receiptName));
+    if (j?.source === "user") return j.verdict;
+    const rule = ruleBasedStoreVerdict(cardName, receiptName);
+    if (rule) return rule;
     return j ? j.verdict : "pending";
   };
 }
@@ -143,14 +161,33 @@ export async function runReconciliation(options: {
 
   let finalizedIds: string[] = [];
   if (options.finalizeCash) {
-    const coverage = cardCoverage(cardRows.map((r) => r.date));
-    finalizedIds = finalizeUnmatchedReceiptsAsCash(result.receipts, coverage, {
-      unresolvedPairs: result.unresolvedPairs,
-    }).finalizedIds;
+    finalizedIds = finalizeUnmatchedReceiptsAsCash(
+      result.receipts,
+      buildImportCoverages(cardRows),
+      { unresolvedPairs: result.unresolvedPairs, taxCandidatePairs: result.taxCandidatePairs }
+    ).finalizedIds;
   }
 
   const unitById = new Map(units.map((u) => [u.id, u]));
+  const finalized = new Set(finalizedIds);
+  const reasonChanges = new Map<UnmatchedReason, string[]>();
+  for (const r of result.receipts) {
+    if (r.status !== "unmatched" || finalized.has(r.id) || !r.unmatchedReason) continue;
+    const unit = unitById.get(r.id);
+    if (!unit || unit.unmatchedReason === r.unmatchedReason) continue;
+    reasonChanges.set(r.unmatchedReason, [
+      ...(reasonChanges.get(r.unmatchedReason) ?? []),
+      ...unit.rowIds,
+    ]);
+  }
+
   await prisma.$transaction(async (tx) => {
+    for (const [reason, rowIds] of reasonChanges) {
+      await tx.transaction.updateMany({
+        where: { id: { in: rowIds } },
+        data: { unmatchedReason: reason },
+      });
+    }
     for (const m of result.matches) {
       const unit = unitById.get(m.receiptId)!;
       await tx.transaction.update({
@@ -167,6 +204,7 @@ export async function runReconciliation(options: {
           reconcileStatus: "matched",
           matchedCardId: m.cardId,
           needsReview: m.needsReview,
+          unmatchedReason: null,
         },
       });
     }
@@ -174,7 +212,12 @@ export async function runReconciliation(options: {
     if (cashRowIds.length > 0) {
       await tx.transaction.updateMany({
         where: { id: { in: cashRowIds } },
-        data: { reconcileStatus: "cash", paymentMethod: "cash", cashSource: "auto" },
+        data: {
+          reconcileStatus: "cash",
+          paymentMethod: "cash",
+          cashSource: "auto",
+          unmatchedReason: null,
+        },
       });
     }
   });
@@ -323,14 +366,27 @@ type RowView = {
   amount: number;
 };
 
-function unitView(u: ReceiptUnit): RowView & { rowCount: number } {
-  return { id: u.rowIds[0], date: u.date, storeName: u.storeName, amount: u.amount, rowCount: u.rowIds.length };
+function unitView(u: ReceiptUnit): RowView & { rowCount: number; reason: UnmatchedReason | null } {
+  return {
+    id: u.rowIds[0],
+    date: u.date,
+    storeName: u.storeName,
+    amount: u.amount,
+    rowCount: u.rowIds.length,
+    reason: u.unmatchedReason ?? null,
+  };
 }
 
-/** 照合画面のデータ（月単位） */
+/** 照合画面のデータ（月単位。月は利用日・レシート日付で決める） */
 export async function getReconcileView(month: string) {
-  const [ledger, judgements] = await Promise.all([loadLedger(), loadJudgements()]);
+  const [ledger, judgements, batches] = await Promise.all([
+    loadLedger(),
+    loadJudgements(),
+    prisma.cardImportBatch.findMany(),
+  ]);
   const inMonth = (date: string) => date.startsWith(month);
+  const monthStart = `${month}-01`;
+  const monthEnd = addDays(addDays(monthStart, 32).slice(0, 7) + "-01", -1);
   const monthRows = ledger.filter((r) => inMonth(r.date));
   const cardRows = ledger.filter((r) => r.source === "CSV");
   const { units, legacyLineItems } = buildReceiptUnits(ledger);
@@ -363,11 +419,8 @@ export async function getReconcileView(month: string) {
     .flatMap((card) =>
       [...openUnits, ...autoCashUnits]
         .filter((u) => u.amount !== card.amount)
-        .filter((u) => {
-          const verdict = judge(card.description, u.storeName);
-          if (verdict === "different") return false;
-          return verdict === "same" || compareStoreNames(card.description, u.storeName).similar;
-        })
+        .filter((u) => Math.abs(diffDays(card.date, u.date)) <= DEFAULT_MAX_DAYS)
+        .filter((u) => judge(card.description, u.storeName) === "same")
         .map((u) => ({
           cardId: card.id,
           cardDate: card.date,
@@ -375,6 +428,7 @@ export async function getReconcileView(month: string) {
           cardAmount: card.amount,
           receipt: unitView(u),
           receiptIsAutoCash: u.status === "cash",
+          taxExclusiveLikely: isTaxInclusiveAmount(u.amount, card.amount),
           amountDiff: u.amount - card.amount,
           dateDiffDays: diffDays(card.date, u.date),
         }))
@@ -400,11 +454,50 @@ export async function getReconcileView(month: string) {
       reason: j.reason,
     }));
 
-  const coverage = cardCoverage(cardRows.map((r) => r.date));
+  const batchById = new Map(batches.map((b) => [b.id, b]));
+  const coverages = buildImportCoverages(cardRows);
+  const importBatches = coverages
+    .map((c) => {
+      const b = batchById.get(c.batchId);
+      return {
+        id: c.batchId,
+        legacy: c.batchId === LEGACY_BATCH_ID,
+        fileName: b?.fileName ?? null,
+        paymentMonth: b?.paymentMonth ?? null,
+        importedAt: b?.createdAt.toISOString() ?? null,
+        count: c.count,
+        from: c.from,
+        to: c.to,
+        segments: c.segments,
+      };
+    })
+    .sort((a, b) => b.to.localeCompare(a.to));
+  const monthCoverage = {
+    cardCount: cardRows.filter((r) => inMonth(r.date)).length,
+    ranges: coverages
+      .flatMap((c) => c.segments)
+      .filter((s) => s.from <= monthEnd && s.to >= monthStart)
+      .map((s) => ({
+        from: s.from < monthStart ? monthStart : s.from,
+        to: s.to > monthEnd ? monthEnd : s.to,
+      }))
+      .sort((a, b) => a.from.localeCompare(b.from)),
+  };
+
+  const cardById = new Map(cardRows.map((r) => [r.id, r]));
+  const outOfRangeMatches = findOutOfRangeMatches(ledger)
+    .filter((m) => inMonth(m.cardDate) || inMonth(m.receiptDate))
+    .map((m) => ({
+      ...m,
+      cardStoreName: cardById.get(m.cardId)?.description ?? null,
+      amount: cardById.get(m.cardId)?.amount ?? null,
+    }));
 
   return {
     month,
-    coverage,
+    importBatches,
+    monthCoverage,
+    outOfRangeMatches,
     summary: buildReconcileSummary(monthRows),
     unmatchedCards: unmatchedCards.map((r) => ({
       id: r.id,

@@ -1,58 +1,61 @@
 /**
- * 既存データにカード明細とレシートの突合を適用する一度きりスクリプト（通常ロジックとは別管理）。
+ * 既存データに、利用日の窓・CSV取込単位の範囲・未照合の理由を使う突合を適用するスクリプト
+ * （通常ロジックとは別管理。照合の判定そのものはアプリと同じ関数を使う）。
  *
- * ドライラン（書き込みなし。マイグレーション前の DB でも動く）:
+ * ドライラン（書き込みなし。20261003140000_card_import_batches の適用前でも動く）:
  *   npx tsx --env-file=.env.local scripts/reconcile-existing.ts
- *   npx tsx --env-file=.env.local scripts/reconcile-existing.ts --ai   # 店名の未判定の組を AI（Web 検索）で判定
  *
- * 本実行（マイグレーション適用後のみ。実行前に全件バックアップを自動作成）:
+ * 本実行（マイグレーション適用後のみ。実行前に関連テーブルを全件バックアップ）:
  *   npx tsx --env-file=.env.local scripts/reconcile-existing.ts --apply
- *
- * 店名の AI 判定結果は backups/store-judgements-*.json に保存し、次回以降と --apply で再利用する。
+ *   --fix-wrong-matches を付けると、ドライランで一覧にした「日付差31日超の照合」を解除してから再突合する。
+ *   ドライラン結果をユーザーが確認・承認するまでは付けないこと。
+ *   --ai を付けると、店名の未判定の組を AI（Web 検索）に問い合わせる。
  */
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { prisma } from "../src/lib/prisma";
 import { parseReceiptItemsMemo } from "../src/lib/receipt-aggregation";
 import {
   applyReconcileToRows,
+  buildImportCoverages,
   buildReceiptUnits,
-  cardCoverage,
   countsTowardTotals,
+  DEFAULT_MAX_DAYS,
   finalizeUnmatchedReceiptsAsCash,
-  isLegacyLineItem,
+  findOutOfRangeMatches,
   matchCardAndReceipts,
-  planInitialReconcileState,
   storeNameOf,
   toCardTransaction,
   type LedgerRow,
   type StoreJudge,
 } from "../src/lib/reconcile";
-import { compareStoreNames, normalizeStoreName } from "../src/lib/store-name";
+import {
+  loadJudgements,
+  makeStoreJudge,
+  releaseLinks,
+  runReconciliation,
+} from "../src/lib/reconcile-service";
+import {
+  compareStoreNames,
+  isFacilityTenant,
+  normalizeStoreName,
+  ruleBasedStoreVerdict,
+  storeAliasGroup,
+} from "../src/lib/store-name";
+import { STORE_ALIAS_GROUPS, STORE_FACILITY_GROUPS } from "../src/lib/store-aliases";
 
 const args = new Set(process.argv.slice(2));
 const apply = args.has("--apply");
+const fixWrongMatches = args.has("--fix-wrong-matches");
 const useAi = args.has("--ai");
-
-/** 6月の IMAGE 単独行はカード明細の画像とみられるため、現金への自動判定から除外する（ユーザー確認済み） */
-const EXEMPT_IMAGE_BEFORE = "2026-07-01";
 
 const BACKUP_DIR = path.join(process.cwd(), "backups");
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-");
 
-type Judgement = {
-  cardSample: string;
-  receiptSample: string;
-  verdict: "same" | "different" | "undetermined";
-  source: "ai" | "user";
-  confidence: number | null;
-  merchant: string | null;
-  reason: string | null;
-};
-
 type RawRow = {
   id: string;
   date: Date;
+  createdAt: Date;
   description: string;
   amount: number;
   source: "CSV" | "MANUAL" | "IMAGE";
@@ -60,70 +63,44 @@ type RawRow = {
   memo: string | null;
   confirmed: boolean;
   archived: boolean;
+  deletedAt: Date | null;
+  paymentMethod: LedgerRow["paymentMethod"];
+  reconcileStatus: LedgerRow["reconcileStatus"];
+  cashSource: LedgerRow["cashSource"];
+  needsReview: boolean;
+  receiptGroupId: string | null;
+  matchedReceiptId: string | null;
+  matchedCardId: string | null;
+  autoCashExempt: boolean;
+  rejectedCardIds: string[] | null;
+  unmatchedReason: LedgerRow["unmatchedReason"];
+  importBatchId: string | null;
 };
 
-async function hasReconcileColumns(): Promise<boolean> {
-  const rows = await prisma.$queryRawUnsafe<{ n: bigint }[]>(
-    `SELECT count(*) AS n FROM information_schema.columns
-     WHERE table_name = 'Transaction' AND column_name = 'reconcileStatus'`
+async function columnsOf(table: string): Promise<Set<string>> {
+  const rows = await prisma.$queryRawUnsafe<{ column_name: string }[]>(
+    `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+    table
   );
-  return Number(rows[0]?.n ?? 0) > 0;
+  return new Set(rows.map((r) => r.column_name));
 }
 
-async function loadRows(): Promise<RawRow[]> {
-  // マイグレーション前でも動くよう、既存カラムだけを読む
+/** マイグレーション前でも動くよう、存在するカラムだけを読む */
+async function loadRows(columns: Set<string>): Promise<RawRow[]> {
+  const optional = (name: string, fallback: string) =>
+    columns.has(name) ? `"${name}"${name === "unmatchedReason" ? "::text" : ""}` : `${fallback} AS "${name}"`;
   return prisma.$queryRawUnsafe<RawRow[]>(
-    `SELECT id, date, description, amount, source::text AS source, "categoryId", memo, confirmed, archived
+    `SELECT id, date, "createdAt", description, amount, source::text AS source, "categoryId", memo,
+            confirmed, archived, "deletedAt", "paymentMethod"::text AS "paymentMethod",
+            "reconcileStatus"::text AS "reconcileStatus", "cashSource"::text AS "cashSource",
+            "needsReview", "receiptGroupId", "matchedReceiptId", "matchedCardId", "autoCashExempt",
+            "rejectedCardIds", ${optional("unmatchedReason", "NULL")}, ${optional("importBatchId", "NULL")}
      FROM "Transaction" ORDER BY date ASC, id ASC`
   );
 }
 
-async function loadCachedJudgements(): Promise<Judgement[]> {
-  await mkdir(BACKUP_DIR, { recursive: true });
-  const files = (await readdir(BACKUP_DIR)).filter((f) => f.startsWith("store-judgements-")).sort();
-  const latest = files.at(-1);
-  if (!latest) return [];
-  return JSON.parse(await readFile(path.join(BACKUP_DIR, latest), "utf8")).judgements;
-}
-
-function judgementKey(cardName: string, receiptName: string) {
-  return `${normalizeStoreName(cardName)}\u0000${normalizeStoreName(receiptName)}`;
-}
-
-function makeJudge(judgements: Judgement[]): StoreJudge {
-  const map = new Map(judgements.map((j) => [judgementKey(j.cardSample, j.receiptSample), j]));
-  return (cardName, receiptName) => {
-    const a = normalizeStoreName(cardName);
-    if (a && a === normalizeStoreName(receiptName)) return "same";
-    return map.get(judgementKey(cardName, receiptName))?.verdict ?? "pending";
-  };
-}
-
-function monthOf(date: string) {
-  return date.slice(0, 7);
-}
-
-function monthlyTotals(rows: LedgerRow[], counts: (r: LedgerRow) => boolean) {
-  const out: Record<string, { total: number; cash: number }> = {};
-  for (const r of rows) {
-    if (!counts(r)) continue;
-    const m = (out[monthOf(r.date)] ??= { total: 0, cash: 0 });
-    m.total += r.amount;
-    if (r.reconcileStatus === "cash") m.cash += r.amount;
-  }
-  return out;
-}
-
-async function main() {
-  const migrated = await hasReconcileColumns();
-  if (apply && !migrated) {
-    throw new Error(
-      "--apply にはマイグレーション（20261003120000_add_card_receipt_reconciliation）の適用が必要です"
-    );
-  }
-
-  const raw = await loadRows();
-  const ledger: LedgerRow[] = raw.map((r) => ({
+function toLedger(r: RawRow): LedgerRow {
+  return {
     id: r.id,
     date: r.date.toISOString().slice(0, 10),
     description: r.description,
@@ -133,235 +110,399 @@ async function main() {
     memo: r.memo,
     confirmed: r.confirmed,
     archived: r.archived,
-    deletedAt: null,
-    paymentMethod: null,
-    reconcileStatus: "unmatched",
-    cashSource: null,
-    needsReview: false,
-    receiptGroupId: null,
-    matchedReceiptId: null,
-    matchedCardId: null,
-    autoCashExempt: false,
-    rejectedCardIds: [],
-  }));
+    deletedAt: r.deletedAt,
+    paymentMethod: r.paymentMethod,
+    reconcileStatus: r.reconcileStatus,
+    cashSource: r.cashSource,
+    needsReview: r.needsReview,
+    receiptGroupId: r.receiptGroupId,
+    matchedReceiptId: r.matchedReceiptId,
+    matchedCardId: r.matchedCardId,
+    autoCashExempt: r.autoCashExempt,
+    rejectedCardIds: r.rejectedCardIds ?? [],
+    unmatchedReason: r.unmatchedReason ?? null,
+    importBatchId: r.importBatchId,
+  };
+}
 
-  // 1. 初期値（現金と判別できる既存データは無いため cashIds は空。調査結果どおり）
-  const active = ledger.filter((r) => !r.archived && r.confirmed !== false);
-  const exemptIds = new Set(
-    active
-      .filter(
-        (r) =>
-          r.source === "IMAGE" &&
-          r.date < EXEMPT_IMAGE_BEFORE &&
-          !parseReceiptItemsMemo(r.memo) &&
-          !isLegacyLineItem(r)
-      )
-      .map((r) => r.id)
-  );
-  const initialized = ledger.map((r) => ({
-    ...r,
-    ...planInitialReconcileState(r, { cashIds: new Set(), cardReceiptIds: new Set(), exemptIds }),
-  }));
+/**
+ * 取込単位の記録が無い既存のCSV行を、取込時刻（分単位）でまとめて「以前の取込」とする。
+ * ファイル名・支払月は記録が無いため推測しない（null のまま）。
+ */
+function planLegacyBatches(rows: RawRow[]) {
+  const groups = new Map<string, RawRow[]>();
+  for (const r of rows) {
+    if (r.source !== "CSV" || r.importBatchId) continue;
+    const key = r.createdAt.toISOString().slice(0, 16);
+    groups.set(key, [...(groups.get(key) ?? []), r]);
+  }
+  return [...groups].map(([minute, list], i) => {
+    const dates = list.map((r) => r.date.toISOString().slice(0, 10)).sort();
+    return {
+      plannedId: `legacy-${i + 1}`,
+      importedAt: `${minute}Z`,
+      rowIds: list.map((r) => r.id),
+      rowCount: list.length,
+      from: dates[0],
+      to: dates[dates.length - 1],
+    };
+  });
+}
 
-  // 2. 突合（店名は保存済み判定 → 無ければ AI）
-  const cardRows = initialized.filter((r) => r.source === "CSV" && !r.archived);
-  const cards = cardRows.map(toCardTransaction);
-  const { units, legacyLineItems } = buildReceiptUnits(initialized);
-  let judgements = await loadCachedJudgements();
-  let result = matchCardAndReceipts(cards, units, { judgeStore: makeJudge(judgements) });
+function judgeSource(
+  judgements: Awaited<ReturnType<typeof loadJudgements>>,
+  cardName: string,
+  receiptName: string
+) {
+  const key = `${normalizeStoreName(cardName)}\u0000${normalizeStoreName(receiptName)}`;
+  const j = judgements.get(key);
+  if (j?.source === "user") return `user:${j.verdict}`;
+  if (normalizeStoreName(cardName) === normalizeStoreName(receiptName)) return "rule:same_name";
+  if (isFacilityTenant(cardName, receiptName)) return "rule:facility";
+  const ga = storeAliasGroup(cardName);
+  const gb = storeAliasGroup(receiptName);
+  if (ga && gb) return ga === gb ? "rule:alias" : "rule:alias_different";
+  const rule = ruleBasedStoreVerdict(cardName, receiptName);
+  if (rule === "same") return "rule:text_similar";
+  if (rule === "different") return "rule:facility_excluded";
+  return j ? `ai:${j.verdict}` : "pending";
+}
 
-  if (useAi && result.unresolvedPairs.length > 0) {
-    const { judgeStorePairsWithAi } = await import("../src/lib/store-match-ai");
-    const toAsk = new Map<string, { cardName: string; receiptName: string }>();
-    for (const p of result.unresolvedPairs) {
-      toAsk.set(judgementKey(p.cardName, p.receiptName), {
-        cardName: p.cardName,
-        receiptName: p.receiptName,
-      });
+function monthlyTotals(rows: LedgerRow[]) {
+  const out: Record<string, { total: number; card: number; cashConfirmed: number; cashAuto: number }> = {};
+  for (const r of rows) {
+    if (!countsTowardTotals(r)) continue;
+    const m = (out[r.date.slice(0, 7)] ??= { total: 0, card: 0, cashConfirmed: 0, cashAuto: 0 });
+    m.total += r.amount;
+    if (r.reconcileStatus === "cash") {
+      if (r.cashSource === "auto") m.cashAuto += r.amount;
+      else m.cashConfirmed += r.amount;
+    } else if (r.source === "CSV" || r.reconcileStatus === "matched") {
+      m.card += r.amount;
     }
-    const examples = judgements
-      .filter((j) => j.source === "user" && j.verdict !== "undetermined")
-      .map((j) => ({
-        cardName: j.cardSample,
-        receiptName: j.receiptSample,
-        verdict: j.verdict as "same" | "different",
-        note: j.reason,
-      }));
-    const answers = await judgeStorePairsWithAi([...toAsk.values()], examples);
-    const byKey = new Map(judgements.map((j) => [judgementKey(j.cardSample, j.receiptSample), j]));
-    for (const a of answers) {
-      const key = judgementKey(a.cardName, a.receiptName);
-      if (byKey.get(key)?.source === "user") continue;
-      byKey.set(key, {
-        cardSample: a.cardName,
-        receiptSample: a.receiptName,
-        verdict: a.verdict,
-        source: "ai",
-        confidence: a.confidence,
-        merchant: a.merchant,
-        reason: a.reason,
-      });
-    }
-    judgements = [...byKey.values()];
-    const file = path.join(BACKUP_DIR, `store-judgements-${stamp()}.json`);
-    await writeFile(file, JSON.stringify({ savedAt: new Date().toISOString(), judgements }, null, 2));
-    console.error(`AI 判定結果を保存しました: ${file}`);
-    result = matchCardAndReceipts(cards, units, { judgeStore: makeJudge(judgements) });
+  }
+  return out;
+}
+
+async function main() {
+  const txColumns = await columnsOf("Transaction");
+  const migratedV2 = txColumns.has("importBatchId") && txColumns.has("dupIndex");
+  if (apply && !migratedV2) {
+    throw new Error("--apply にはマイグレーション（20261003140000_card_import_batches）の適用が必要です");
+  }
+  if (fixWrongMatches && !apply) {
+    throw new Error("--fix-wrong-matches は --apply と一緒に指定してください（ドライランでは一覧のみ表示します）");
   }
 
-  // 3. 現金への自動判定（カード明細CSVの期間内に限定）
-  const coverage = cardCoverage(cardRows.map((r) => r.date));
-  const finalized = finalizeUnmatchedReceiptsAsCash(result.receipts, coverage, {
-    unresolvedPairs: result.unresolvedPairs,
-  });
-  const after = applyReconcileToRows(initialized, units, result.matches, finalized.finalizedIds);
+  const raw = await loadRows(txColumns);
+  const existingBatches = migratedV2
+    ? await prisma.cardImportBatch.findMany({ orderBy: { createdAt: "asc" } })
+    : [];
+  const legacyBatches = planLegacyBatches(raw);
+  const plannedBatchOf = new Map(legacyBatches.flatMap((b) => b.rowIds.map((id) => [id, b.plannedId])));
+
+  const ledgerAll = raw.map(toLedger).map((r) => ({
+    ...r,
+    importBatchId: r.importBatchId ?? plannedBatchOf.get(r.id) ?? null,
+  }));
+  const ledger = ledgerAll.filter((r) => !r.archived && !r.deletedAt && r.confirmed !== false);
+
+  // 1. 日付差が31日を超える既存の照合（誤突合の候補）。承認があるまで解除しない
+  const wrongMatches = findOutOfRangeMatches(ledger, DEFAULT_MAX_DAYS);
+  const rowById = new Map(ledger.map((r) => [r.id, r]));
+
+  // 2. 再突合のシミュレーション（--fix-wrong-matches を付けた場合と同じく、誤突合を解除した状態から）
+  const wrongCardIds = new Set(wrongMatches.map((m) => m.cardId));
+  const wrongReceiptRowIds = new Set(wrongMatches.flatMap((m) => m.receiptRowIds));
+  const simulateFix = (rows: LedgerRow[]): LedgerRow[] =>
+    rows.map((r) => {
+      if (wrongCardIds.has(r.id)) {
+        return { ...r, reconcileStatus: "unmatched", matchedReceiptId: null, needsReview: false };
+      }
+      if (wrongReceiptRowIds.has(r.id)) {
+        return {
+          ...r,
+          reconcileStatus: "unmatched",
+          matchedCardId: null,
+          needsReview: false,
+          rejectedCardIds: [...new Set([...r.rejectedCardIds, r.matchedCardId!])],
+        };
+      }
+      return r;
+    });
+
+  const judgements = await loadJudgements();
+  const judge: StoreJudge = makeStoreJudge(judgements);
+
+  const simulate = (base: LedgerRow[]) => {
+    const cardRows = base.filter((r) => r.source === "CSV");
+    const cards = cardRows.map(toCardTransaction);
+    const { units, legacyLineItems } = buildReceiptUnits(base);
+    const result = matchCardAndReceipts(cards, units, { judgeStore: judge });
+    const finalized = finalizeUnmatchedReceiptsAsCash(result.receipts, buildImportCoverages(cardRows), {
+      unresolvedPairs: result.unresolvedPairs,
+      taxCandidatePairs: result.taxCandidatePairs,
+    });
+    const after = applyReconcileToRows(base, units, result.matches, finalized.finalizedIds, finalized.receipts);
+    return { cardRows, cards, units, legacyLineItems, result, finalized, after };
+  };
+
+  const keep = simulate(ledger);
+  const fixed = wrongMatches.length > 0 ? simulate(simulateFix(ledger)) : keep;
+  const plan = fixWrongMatches ? fixed : keep;
+  const { cardRows, cards, units, legacyLineItems, result, finalized, after } = plan;
 
   const unitById = new Map(units.map((u) => [u.id, u]));
-  const rowById = new Map(after.map((r) => [r.id, r]));
   const cardById = new Map(cards.map((c) => [c.id, c]));
+  const afterById = new Map(after.map((r) => [r.id, r]));
   const describeUnit = (id: string) => {
     const u = unitById.get(id)!;
     return { date: u.date, storeName: u.storeName, amount: u.amount, rows: u.rowIds.length };
   };
 
-  // 細分化される件数: 突合したレシートのうち、内訳が複数カテゴリのもの
-  const splitCount = result.matches.filter((m) => {
-    const u = unitById.get(m.receiptId)!;
-    const cats = new Set<string | null>();
-    for (const id of u.rowIds) {
-      const r = rowById.get(id)!;
-      const memo = parseReceiptItemsMemo(r.memo);
-      if (memo) memo.items.forEach((i) => cats.add(i.categoryId ?? null));
-      else cats.add(r.categoryId ?? null);
-    }
-    return cats.size > 1;
-  }).length;
+  // 細分化される件数: 照合したレシートのうち、内訳が複数カテゴリのもの
+  const splitCount = after
+    .filter((r) => r.source === "CSV" && r.reconcileStatus === "matched" && r.matchedReceiptId)
+    .filter((card) => {
+      const u = unitById.get(card.matchedReceiptId!);
+      if (!u) return false;
+      const cats = new Set<string | null>();
+      for (const id of u.rowIds) {
+        const r = afterById.get(id)!;
+        const memo = parseReceiptItemsMemo(r.memo);
+        if (memo) memo.items.forEach((i) => cats.add(i.categoryId ?? null));
+        else cats.add(r.categoryId ?? null);
+      }
+      return cats.size > 1;
+    }).length;
 
-  const before = monthlyTotals(ledger, (r) => !r.archived && r.confirmed !== false);
-  const afterTotals = monthlyTotals(after, countsTowardTotals);
+  const before = monthlyTotals(ledger);
+  const afterTotals = monthlyTotals(after);
   const months = [...new Set([...Object.keys(before), ...Object.keys(afterTotals)])].sort();
 
-  const nonCard = after.filter((r) => r.source !== "CSV" && !r.archived);
+  const coverages = buildImportCoverages(cardRows);
+  const coverageById = new Map(coverages.map((c) => [c.batchId, c]));
+  const batchReport = [
+    ...existingBatches.map((b) => ({
+      id: b.id,
+      fileName: b.fileName,
+      paymentMonth: b.paymentMonth,
+      importedAt: b.createdAt.toISOString(),
+      planned: false,
+    })),
+    ...legacyBatches.map((b) => ({
+      id: b.plannedId,
+      fileName: null,
+      paymentMonth: null,
+      importedAt: b.importedAt,
+      planned: true,
+    })),
+  ].map((b) => {
+    const c = coverageById.get(b.id);
+    return {
+      ...b,
+      fileName: b.fileName ?? "（記録なし。以前の取込のため推測しません）",
+      rowCount: c?.count ?? 0,
+      usageFrom: c?.from ?? null,
+      usageTo: c?.to ?? null,
+      cashJudgeSegments: c?.segments ?? [],
+    };
+  });
+
+  const finalizedSet = new Set(finalized.finalizedIds);
+  const nonCard = after.filter((r) => r.source !== "CSV");
+  const existingAutoCash = units.filter((u) => u.status === "cash" && u.cashSource === "auto");
+  const autoCashOutsideNewCoverage = existingAutoCash.filter(
+    (u) =>
+      !coverages.some((c) =>
+        c.segments.some((s) => s.from <= u.date && u.date <= s.to)
+      )
+  );
+
+  const unmatchedReceipts = finalized.receipts.filter(
+    (r) => r.status === "unmatched" && !finalizedSet.has(r.id)
+  );
+
   const report = {
-    mode: apply ? "apply" : "dry-run",
-    migrationApplied: migrated,
-    coverage,
+    mode: apply ? (fixWrongMatches ? "apply+fix-wrong-matches" : "apply") : "dry-run",
+    migrationApplied: { cardImportBatches: migratedV2 },
+    importBatches: batchReport,
+    wrongMatches: {
+      note: "日付差が31日を超える既存の照合。承認後に --apply --fix-wrong-matches で解除して再突合します（自動では解除しません）",
+      count: wrongMatches.length,
+      items: wrongMatches.map((m) => ({
+        card: {
+          date: m.cardDate,
+          storeName: rowById.get(m.cardId)?.description,
+          amount: rowById.get(m.cardId)?.amount,
+        },
+        receipt: {
+          date: m.receiptDate,
+          storeName: storeNameOf(rowById.get(m.receiptRowIds[0])?.description ?? ""),
+        },
+        dateDiffDays: m.dateDiffDays,
+      })),
+      rematchIfFixed:
+        wrongMatches.length > 0
+          ? {
+              newMatches: fixed.result.matches.length - keep.result.matches.length,
+              autoCash: fixed.finalized.finalizedIds.length,
+            }
+          : null,
+    },
     classification: {
-      note: "支払方法を示すデータが無いため、現金・カードと判別できた既存データは0件",
       csvCardStatements: cardRows.length,
       receiptsAndManual: {
-        cash: nonCard.filter((r) => r.paymentMethod === "cash" && r.cashSource === "confirmed").length,
+        cashConfirmed: nonCard.filter((r) => r.reconcileStatus === "cash" && r.cashSource === "confirmed").length,
+        cashAuto: nonCard.filter((r) => r.reconcileStatus === "cash" && r.cashSource === "auto").length,
         creditCard: nonCard.filter((r) => r.paymentMethod === "credit_card").length,
         unknown: nonCard.filter((r) => r.paymentMethod === "unknown").length,
       },
-      unknownNegativeRows: after
-        .filter((r) => !r.archived && r.reconcileStatus === "unknown")
-        .map((r) => ({ date: r.date, source: r.source, description: r.description, amount: r.amount })),
-      autoCashExempt: [...exemptIds].map((id) => {
-        const r = rowById.get(id)!;
-        return { date: r.date, description: r.description, amount: r.amount };
-      }),
       receiptUnits: units.length,
       legacyLineItemsExcluded: legacyLineItems.length,
     },
-    matches: result.matches.map((m) => ({
-      card: { date: m.cardDate, storeName: cardById.get(m.cardId)!.storeName, amount: cardById.get(m.cardId)!.amount },
-      receipt: describeUnit(m.receiptId),
-      dateDiffDays: m.dateDiffDays,
-      needsReview: m.needsReview,
-    })),
-    needsReview: result.matches.filter((m) => m.needsReview).length,
+    newMatches: result.matches
+      .filter((m) => rowById.get(m.cardId)?.reconcileStatus !== "matched")
+      .map((m) => ({
+        card: { date: m.cardDate, storeName: cardById.get(m.cardId)!.storeName, amount: cardById.get(m.cardId)!.amount },
+        receipt: describeUnit(m.receiptId),
+        dateDiffDays: m.dateDiffDays,
+        needsReview: m.needsReview,
+        storeRule: judgeSource(judgements, cardById.get(m.cardId)!.storeName, unitById.get(m.receiptId)!.storeName),
+      })),
+    needsReview: after.filter((r) => r.source === "CSV" && r.needsReview).length,
     unresolvedStorePairs: result.unresolvedPairs.map((p) => ({
       card: p.cardName,
       receipt: p.receiptName,
       verdict: p.verdict,
       amount: cardById.get(p.cardId)!.amount,
     })),
-    autoCash: finalized.finalizedIds.map(describeUnit),
+    taxExclusiveReceiptCandidates: {
+      note: "カード金額がレシート金額の税込換算（8%〜10%）に当たる同じ店の組。税抜で読み取ったレシートの可能性が高いため、現金への自動判定から除外します",
+      items: result.taxCandidatePairs.map((p) => ({
+        card: {
+          date: cardById.get(p.cardId)!.date,
+          storeName: cardById.get(p.cardId)!.storeName,
+          amount: cardById.get(p.cardId)!.amount,
+        },
+        receipt: describeUnit(p.receiptId),
+      })),
+    },
+    autoCashPlanned: finalized.finalizedIds.map(describeUnit),
+    existingAutoCashOutsideNewCoverage: {
+      note: "以前の判定で現金(自動)になったが、新しい範囲の判定では対象外になるレシート。自動では戻しません",
+      items: autoCashOutsideNewCoverage.map((u) => describeUnit(u.id)),
+    },
     unmatchedCards: result.cards.filter((c) => c.status === "unmatched").length,
-    unmatchedReceipts: finalized.receipts.filter((r) => r.status === "unmatched").length,
+    unmatchedReceipts: {
+      total: unmatchedReceipts.length,
+      noCsvCoverage: unmatchedReceipts.filter((r) => r.unmatchedReason === "no_csv_coverage").length,
+      noCandidate: unmatchedReceipts.filter((r) => r.unmatchedReason === "no_candidate").length,
+      byMonth: Object.entries(
+        unmatchedReceipts.reduce<Record<string, { no_csv_coverage: number; no_candidate: number }>>((acc, r) => {
+          const m = (acc[r.date.slice(0, 7)] ??= { no_csv_coverage: 0, no_candidate: 0 });
+          if (r.unmatchedReason) m[r.unmatchedReason] += 1;
+          return acc;
+        }, {})
+      )
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([month, v]) => ({ month, ...v })),
+    },
     splitByCategoryCount: splitCount,
     monthlyTotals: months.map((m) => ({
       month: m,
       before: before[m]?.total ?? 0,
       after: afterTotals[m]?.total ?? 0,
       diff: (afterTotals[m]?.total ?? 0) - (before[m]?.total ?? 0),
-      cashAfter: afterTotals[m]?.cash ?? 0,
+      cardAfter: afterTotals[m]?.card ?? 0,
+      cashConfirmedAfter: afterTotals[m]?.cashConfirmed ?? 0,
+      cashAutoAfter: afterTotals[m]?.cashAuto ?? 0,
     })),
-    aiJudgements: judgements.map((j) => ({
-      card: j.cardSample,
-      receipt: j.receiptSample,
-      verdict: j.verdict,
-      confidence: j.confidence,
-      merchant: j.merchant,
-      reason: j.reason,
-    })),
-    storeNamePairs: buildStoreNamePairs(after, makeJudge(judgements)),
+    storeNameCoverage: buildStoreNameCoverage(after, judgements),
   };
   console.log(JSON.stringify(report, null, 2));
 
   if (!apply) return;
 
-  // 4. 本実行: バックアップ → 1トランザクションで反映（元データは削除しない）
+  // 本実行: バックアップ → 取込単位の記録と誤突合の解除 → アプリと同じ突合処理（元データは削除しない）
   await mkdir(BACKUP_DIR, { recursive: true });
-  const backupRows = await prisma.$queryRawUnsafe<Record<string, unknown>[]>(
-    `SELECT * FROM "Transaction" ORDER BY date ASC, id ASC`
-  );
-  const backupFile = path.join(BACKUP_DIR, `transactions-pre-reconcile-${stamp()}.json`);
-  await writeFile(backupFile, JSON.stringify({ count: backupRows.length, transactions: backupRows }, null, 2));
-  console.error(`バックアップ: ${backupFile}（${backupRows.length}件）`);
+  const backup = {
+    transactions: await prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT * FROM "Transaction" ORDER BY date ASC, id ASC`
+    ),
+    cardImportBatches: await prisma.$queryRawUnsafe<Record<string, unknown>[]>(`SELECT * FROM "CardImportBatch"`),
+    storeMatchJudgements: await prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT * FROM "StoreMatchJudgement"`
+    ),
+  };
+  const backupFile = path.join(BACKUP_DIR, `pre-reconcile-v2-${stamp()}.json`);
+  await writeFile(backupFile, JSON.stringify(backup, null, 2));
+  console.error(`バックアップ: ${backupFile}（取引${backup.transactions.length}件）`);
 
   await prisma.$transaction(
     async (tx) => {
-      for (const r of after) {
-        if (r.archived) continue;
-        await tx.transaction.update({
-          where: { id: r.id },
+      for (const b of legacyBatches) {
+        const batch = await tx.cardImportBatch.create({
           data: {
-            paymentMethod: r.paymentMethod,
-            reconcileStatus: r.reconcileStatus,
-            cashSource: r.cashSource,
-            needsReview: r.needsReview,
-            matchedReceiptId: r.matchedReceiptId,
-            matchedCardId: r.matchedCardId,
-            autoCashExempt: r.autoCashExempt,
+            fileName: null,
+            format: null,
+            paymentMonth: null,
+            rowCount: b.rowCount,
+            coverageStart: new Date(`${b.from}T00:00:00Z`),
+            coverageEnd: new Date(`${b.to}T00:00:00Z`),
+            createdAt: new Date(b.importedAt),
           },
         });
-      }
-      for (const j of judgements) {
-        const cardName = normalizeStoreName(j.cardSample);
-        const receiptName = normalizeStoreName(j.receiptSample);
-        await tx.storeMatchJudgement.upsert({
-          where: { cardName_receiptName: { cardName, receiptName } },
-          create: { cardName, receiptName, ...j },
-          update: j.source === "ai" ? {} : j,
+        await tx.transaction.updateMany({
+          where: { id: { in: b.rowIds }, importBatchId: null },
+          data: { importBatchId: batch.id },
         });
       }
+      if (fixWrongMatches && wrongCardIds.size > 0) {
+        await releaseLinks([...wrongCardIds], { rejectPair: true }, tx);
+      }
     },
-    { maxWait: 20_000, timeout: 180_000 }
+    { maxWait: 20_000, timeout: 120_000 }
   );
-  console.error("本実行が完了しました");
+
+  const run = await runReconciliation({ useAi, finalizeCash: true });
+  console.error(`本実行が完了しました: ${JSON.stringify(run)}`);
 }
 
-/** カード側とレシート側の店名の対応（金額は問わない）。網羅確認用 */
-function buildStoreNamePairs(rows: LedgerRow[], judge: StoreJudge) {
-  const active = rows.filter((r) => !r.archived);
-  const cardNames = [...new Set(active.filter((r) => r.source === "CSV").map((r) => r.description))];
+/** カード側の店名ごとに、同じ店と判定されるレシート側の店名と、その根拠（金額・日付は問わない） */
+function buildStoreNameCoverage(rows: LedgerRow[], judgements: Awaited<ReturnType<typeof loadJudgements>>) {
+  const cardNames = [...new Set(rows.filter((r) => r.source === "CSV").map((r) => r.description))];
   const receiptNames = [
-    ...new Set(active.filter((r) => r.source !== "CSV").map((r) => storeNameOf(r.description))),
+    ...new Set(rows.filter((r) => r.source !== "CSV").map((r) => storeNameOf(r.description))),
   ];
-  return cardNames
-    .map((card) => {
-      const related = receiptNames
-        .map((receipt) => ({
-          receipt,
-          verdict: judge(card, receipt),
-          textSimilar: compareStoreNames(card, receipt).similar,
-        }))
-        .filter((x) => x.verdict === "same" || x.textSimilar);
-      return { card, receipts: related };
-    })
+  const pairs = cardNames
+    .map((card) => ({
+      card,
+      receipts: receiptNames
+        .map((receipt) => ({ receipt, rule: judgeSource(judgements, card, receipt) }))
+        .filter(
+          (x) =>
+            x.rule.endsWith("same") ||
+            (x.rule.startsWith("rule:") && !x.rule.endsWith("different") && x.rule !== "rule:facility_excluded") ||
+            compareStoreNames(card, x.receipt).similar
+        ),
+    }))
+    .filter((p) => p.receipts.length > 0)
     .sort((a, b) => a.card.localeCompare(b.card, "ja"));
+
+  const allNames = [...cardNames, ...receiptNames];
+  return {
+    pairs,
+    aliasGroupsUsed: STORE_ALIAS_GROUPS.map((g) => ({
+      group: g.name,
+      names: allNames.filter((n) => storeAliasGroup(n) === g.name),
+    })),
+    facilityGroupsUsed: STORE_FACILITY_GROUPS.map((f) => ({
+      card: f.card,
+      receipts: receiptNames.filter((r) => isFacilityTenant(f.card, r)),
+    })),
+    cardNamesWithoutReceiptCandidate: cardNames.filter((c) => !pairs.some((p) => p.card === c)).length,
+  };
 }
 
 main()

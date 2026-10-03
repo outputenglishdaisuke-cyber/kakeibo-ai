@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extractTransactionsFromImage } from "@/lib/classifiers";
 import { ensureDefaultCategories } from "@/lib/default-categories";
+import { alignReceiptToTotal } from "@/lib/receipt-total";
 import type { ParsedTransaction } from "@/types";
 
 /**
@@ -46,7 +47,7 @@ export async function POST(req: NextRequest) {
     const categories = await ensureDefaultCategories();
     const nameToCategory = new Map(categories.map((c) => [c.name, c]));
 
-    const extracted = await extractTransactionsFromImage(
+    const items = await extractTransactionsFromImage(
       base64,
       mediaType,
       categories.map((c) => ({
@@ -60,12 +61,17 @@ export async function POST(req: NextRequest) {
       }))
     );
 
-    if (extracted.length === 0) {
+    if (items.length === 0) {
       return NextResponse.json({
         fileName: file.name,
         transactions: [],
       });
     }
+
+    // カード明細と金額が揃うよう、品目をレシートの税込合計に合わせる
+    const receiptTotal = items.find((i) => i.receiptTotal != null)?.receiptTotal ?? null;
+    const aligned = alignReceiptToTotal(items, receiptTotal);
+    const extracted = aligned.items;
 
     const receiptGroupId = `receipt-${Date.now()}-${Math.random()
       .toString(36)
@@ -99,6 +105,9 @@ export async function POST(req: NextRequest) {
       fileName: file.name,
       receiptGroupId,
       transactions,
+      receiptTotal,
+      taxAdjustment: aligned.adjustment,
+      warnings: aligned.warning ? [aligned.warning] : [],
     });
   } catch (err) {
     const message =

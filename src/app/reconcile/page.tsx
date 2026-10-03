@@ -7,11 +7,28 @@ import { Button } from "@/components/ui/button";
 import { cn, formatCurrency, getMonthKey, shiftMonthKey } from "@/lib/utils";
 import type { ReconcileView } from "@/lib/reconcile-service";
 
-type Row = { id: string; date: string; storeName: string; amount: number; rowCount?: number };
+type Row = {
+  id: string;
+  date: string;
+  storeName: string;
+  amount: number;
+  rowCount?: number;
+  reason?: "no_csv_coverage" | "no_candidate" | null;
+};
+
+const REASON_LABEL = {
+  no_csv_coverage: "CSV未取込の期間",
+  no_candidate: "該当するカード明細なし",
+} as const;
 
 function shortDate(date: string) {
   const [, m, d] = date.split("-");
   return `${Number(m)}/${Number(d)}`;
+}
+
+function fullDate(date: string) {
+  const [y, m, d] = date.split("-");
+  return `${y}/${Number(m)}/${Number(d)}`;
 }
 
 function Section({
@@ -51,7 +68,21 @@ function RowLine({ row, action }: { row: Row; action?: ReactNode }) {
             <span className="ml-1 text-xs text-gray-400">（品目{row.rowCount}行）</span>
           ) : null}
         </p>
-        <p className="text-xs text-gray-500">{shortDate(row.date)}</p>
+        <p className="text-xs text-gray-500">
+          {shortDate(row.date)}
+          {row.reason ? (
+            <span
+              className={cn(
+                "ml-2 rounded px-1",
+                row.reason === "no_csv_coverage"
+                  ? "bg-gray-100 text-gray-600"
+                  : "bg-amber-100 text-amber-800"
+              )}
+            >
+              {REASON_LABEL[row.reason]}
+            </span>
+          ) : null}
+        </p>
       </div>
       <span className="flex-shrink-0 text-sm font-medium tabular-nums">
         {formatCurrency(row.amount)}
@@ -167,10 +198,12 @@ export default function ReconcilePage() {
           <Card className="min-w-0">
             <CardHeader className="pb-3">
               <CardTitle className="text-base">月のサマリー</CardTitle>
-              <p className="text-xs text-gray-500">
-                {data.coverage
-                  ? `取込済みカード明細: ${data.coverage.from} 〜 ${data.coverage.to}`
-                  : "カード明細はまだ取り込まれていません"}
+              <p className="break-words text-xs text-gray-500">
+                {data.monthCoverage.ranges.length > 0
+                  ? `この月のカード明細（利用日）: ${data.monthCoverage.ranges
+                      .map((r) => `${shortDate(r.from)}〜${shortDate(r.to)}`)
+                      .join("、")}（${data.monthCoverage.cardCount}件）`
+                  : "この月の利用日を含むカード明細CSVはまだ取り込まれていません"}
               </p>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -206,6 +239,16 @@ export default function ReconcilePage() {
                   sub={formatCurrency(s.unmatchedReceipts.amount)}
                 />
                 <Stat
+                  label="うちCSV未取込の期間"
+                  value={`${s.unmatchedNoCoverage.count}件`}
+                  sub={formatCurrency(s.unmatchedNoCoverage.amount)}
+                />
+                <Stat
+                  label="うち該当カード明細なし"
+                  value={`${s.unmatchedNoCandidate.count}件`}
+                  sub={formatCurrency(s.unmatchedNoCandidate.amount)}
+                />
+                <Stat
                   label="現金（確定）"
                   value={formatCurrency(s.cashConfirmed.amount)}
                   sub={`${s.cashConfirmed.count}件`}
@@ -225,7 +268,81 @@ export default function ReconcilePage() {
             </CardContent>
           </Card>
 
+          <Section
+            title="CSVの取込状況"
+            description="月は利用日で判定します（ファイル名や支払月は使いません）。現金への自動判定は、各CSVの利用日の範囲内だけで行います。"
+            count={data.importBatches.length}
+          >
+            <ul className="divide-y divide-gray-100">
+              {data.importBatches.map((b) => (
+                <li key={b.id} className="space-y-0.5 py-2 text-sm">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                    <span className="min-w-0 break-all font-medium text-gray-900">
+                      {b.fileName ?? (b.legacy ? "以前の取込（ファイル名の記録なし）" : "ファイル名なし")}
+                    </span>
+                    <span className="flex-shrink-0 text-xs text-gray-500">{b.count}件</span>
+                  </div>
+                  <p className="break-words text-xs text-gray-600">
+                    利用日 {fullDate(b.from)}〜{fullDate(b.to)}
+                    {b.paymentMonth ? ` ／ 支払月 ${b.paymentMonth.replace("-", "/")}` : ""}
+                    {b.importedAt ? ` ／ 取込 ${fullDate(b.importedAt.slice(0, 10))}` : ""}
+                  </p>
+                  {b.segments.length > 1 ||
+                  (b.segments.length === 1 &&
+                    (b.segments[0].from !== b.from || b.segments[0].to !== b.to)) ? (
+                    <p className="break-words text-xs text-gray-500">
+                      現金判定に使う範囲:{" "}
+                      {b.segments.map((g) => `${shortDate(g.from)}〜${shortDate(g.to)}`).join("、")}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </Section>
+
           <div className="grid min-w-0 grid-cols-1 gap-5 lg:grid-cols-2">
+            {data.outOfRangeMatches.length > 0 ? (
+              <Section
+                title="日付差が31日を超える照合"
+                description="以前の照合で、日付が離れすぎている組です。誤りなら解除してください（自動では解除しません）。"
+                count={data.outOfRangeMatches.length}
+              >
+                <ul className="divide-y divide-gray-100">
+                  {data.outOfRangeMatches.map((m) => (
+                    <li key={m.cardId} className="flex items-center gap-3 py-2">
+                      <div className="min-w-0 flex-1 space-y-0.5 text-sm">
+                        <p className="truncate">
+                          カード {shortDate(m.cardDate)} {m.cardStoreName ?? ""}
+                        </p>
+                        <p className="truncate text-gray-600">
+                          レシート {shortDate(m.receiptDate)}
+                        </p>
+                        <p className="text-xs text-amber-700">日付差 {m.dateDiffDays}日</p>
+                      </div>
+                      {m.amount !== null ? (
+                        <span className="flex-shrink-0 text-sm font-medium tabular-nums">
+                          {formatCurrency(m.amount)}
+                        </span>
+                      ) : null}
+                      <Button
+                        variant="ghost"
+                        className={smallBtn}
+                        disabled={busy}
+                        onClick={() =>
+                          act(
+                            { action: "unlink", cardId: m.cardId },
+                            "この照合を解除して未照合に戻しますか？"
+                          )
+                        }
+                      >
+                        解除
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            ) : null}
+
             <Section
               title="店名の判定不可"
               description="AI が同じ店か判断できなかった組です。教えた答えは次回以降の判断材料になります。"
@@ -318,7 +435,11 @@ export default function ReconcilePage() {
               </ul>
             </Section>
 
-            <Section title="未照合のレシート" count={data.unmatchedReceipts.length}>
+            <Section
+              title="未照合のレシート"
+              description="「CSV未取込の期間」は該当期間のCSVを取り込むと照合されます。現金への自動判定はCSV取込時に、そのCSVの範囲内だけで行います。"
+              count={data.unmatchedReceipts.length}
+            >
               <ul className="divide-y divide-gray-100">
                 {data.unmatchedReceipts.map((r) => (
                   <RowLine
@@ -366,7 +487,7 @@ export default function ReconcilePage() {
 
             <Section
               title="金額不一致の候補（参考）"
-              description="店名は似ているが金額が一致しない組です。自動では紐付けません。"
+              description="同じ店で金額が一致しない組です（日付差31日以内）。自動では紐付けません。「税抜で読み取った可能性」の付いたレシートは、現金への自動判定から除外しています。"
               count={data.mismatchCandidates.length}
             >
               <ul className="divide-y divide-gray-100">
@@ -386,6 +507,11 @@ export default function ReconcilePage() {
                         {c.receiptIsAutoCash ? (
                           <span className="ml-1 rounded bg-amber-100 px-1 text-xs text-amber-700">
                             自動現金
+                          </span>
+                        ) : null}
+                        {c.taxExclusiveLikely ? (
+                          <span className="ml-1 rounded bg-sky-100 px-1 text-xs text-sky-800">
+                            税抜で読み取った可能性
                           </span>
                         ) : null}
                       </span>

@@ -1,13 +1,20 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
+  addDays,
   applyReconcileToRows,
+  assignDuplicateIndexes,
+  buildImportCoverages,
   buildReceiptUnits,
   buildReconcileSummary,
-  cardCoverage,
   countsTowardTotals,
+  coverageSegments,
+  describeImportCoverage,
+  diffDays,
   finalizeUnmatchedReceiptsAsCash,
+  findOutOfRangeMatches,
   initialReconcileFields,
+  isTaxInclusiveAmount,
   matchCardAndReceipts,
   planInitialReconcileState,
   toCardTransaction,
@@ -16,6 +23,22 @@ import {
   type Receipt,
   type StoreJudge,
 } from "./reconcile";
+
+/** from〜to の毎日（カード明細が隙間なくある期間の再現用） */
+function daily(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+
+/** 実ファイル 202610.csv（支払月 2026/10）の利用日の分布。8/24 の ETC 4件 + 9月 56件 */
+const CSV_202610_DATES = [
+  ...Array(4).fill("2026-08-24"),
+  ...Object.entries({
+    1: 1, 2: 1, 3: 1, 4: 1, 5: 7, 6: 3, 7: 2, 8: 1, 10: 1, 11: 2, 12: 5, 13: 4, 14: 1,
+    16: 1, 17: 2, 22: 5, 23: 3, 25: 2, 26: 6, 27: 1, 28: 1, 29: 3, 30: 2,
+  }).flatMap(([d, n]) => Array(n).fill(`2026-09-${String(d).padStart(2, "0")}`)),
+];
 
 function card(id: string, date: string, storeName: string, amount: number): CardTransaction {
   return { id, date, storeName, amount, status: "unmatched", receiptId: null };
@@ -136,6 +159,86 @@ describe("matchCardAndReceipts: 成立条件", () => {
   });
 });
 
+describe("matchCardAndReceipts: 日付の窓（利用日の前後31日）", () => {
+  test("31日以内は候補、32日以上離れた組は金額・店名が一致しても突合しない", () => {
+    const at31 = matchCardAndReceipts(
+      [card("c1", "2026-09-01", "サミット", 1000)],
+      [receipt("r1", "2026-08-01", "サミット", 1000)]
+    );
+    const at32 = matchCardAndReceipts(
+      [card("c1", "2026-09-02", "サミット", 1000)],
+      [receipt("r1", "2026-08-01", "サミット", 1000)]
+    );
+    assert.equal(at31.matches.length, 1);
+    assert.equal(at32.matches.length, 0);
+  });
+
+  test("9月のレシートは7月の明細と照合されない（本番で起きていた誤照合の再現）", () => {
+    const r = matchCardAndReceipts(
+      [
+        card("c-jun", "2026-06-06", "ネクストオンライン", 3480),
+        card("c-jul", "2026-06-28", "イオンモール川口", 660),
+      ],
+      [
+        receipt("r-sep", "2026-09-26", "ネクストオンライン", 3480),
+        receipt("r-sep2", "2026-09-12", "イオンスタイル川口", 660),
+      ]
+    );
+    assert.equal(r.matches.length, 0);
+    assert.equal(r.unresolvedPairs.length, 0, "窓の外の組は AI にも問い合わせない");
+    assert.deepEqual(
+      r.receipts.map((x) => x.unmatchedReason),
+      ["no_csv_coverage", "no_csv_coverage"]
+    );
+  });
+
+  test("窓は options.maxDays で変更できる", () => {
+    const r = matchCardAndReceipts(
+      [card("c1", "2026-08-11", "サミット", 1000)],
+      [receipt("r1", "2026-08-01", "サミット", 1000)],
+      { maxDays: 7 }
+    );
+    assert.equal(r.matches.length, 0);
+  });
+
+  test("未照合の理由: 前後31日にカード明細が無ければ no_csv_coverage、あれば no_candidate", () => {
+    const r = matchCardAndReceipts(
+      [
+        card("c1", "2026-07-25", "マクドナルド", 310),
+        card("c-neg", "2026-09-30", "エディオン", -500),
+      ],
+      [
+        receipt("near", "2026-08-20", "八百屋", 800),
+        receipt("far", "2026-08-30", "八百屋", 800),
+        receipt("cash", "2026-08-20", "パン屋", 300, { paymentMethod: "cash", status: "cash" }),
+      ]
+    );
+    const byId = Object.fromEntries(r.receipts.map((x) => [x.id, x]));
+    assert.equal(byId.near.unmatchedReason, "no_candidate");
+    assert.equal(byId.far.unmatchedReason, "no_candidate", "マイナス金額の明細も取込済みの利用日として数える");
+    assert.equal(byId.cash.unmatchedReason, undefined, "現金レシートには理由を付けない");
+
+    const none = matchCardAndReceipts([card("c1", "2026-06-05", "A", 1)], [receipt("r", "2026-09-10", "B", 2)]);
+    assert.equal(none.receipts[0].unmatchedReason, "no_csv_coverage");
+  });
+
+  test("照合できたレシートの理由は消える", () => {
+    const r = matchCardAndReceipts(
+      [card("c1", "2026-08-10", "サミット", 1000)],
+      [receipt("r1", "2026-08-10", "サミット", 1000, { unmatchedReason: "no_csv_coverage" })]
+    );
+    assert.equal(r.receipts[0].unmatchedReason, null);
+  });
+
+  test("既定の店名判定（辞書・類似度）で「ｲｵﾝﾘﾃｰﾙ」と「イオン 渋谷店」が照合される", () => {
+    const r = matchCardAndReceipts(
+      [card("c1", "2026-09-02", "ｲｵﾝﾘﾃｰﾙ", 2480)],
+      [receipt("r1", "2026-09-01", "イオン 渋谷店", 2480)]
+    );
+    assert.equal(r.matches.length, 1);
+  });
+});
+
 describe("matchCardAndReceipts: 割当の優先順位と1対1", () => {
   test("同額・同店舗の複数決済で、日付が最も近い組が優先される", () => {
     const r = matchCardAndReceipts(
@@ -185,19 +288,37 @@ describe("matchCardAndReceipts: 割当の優先順位と1対1", () => {
     assert.equal(custom.matches[0].needsReview, true);
   });
 
-  test("日付を制限しなくても、1枚のレシートが複数カードに（またはその逆に）紐付かない", () => {
+  test("1枚のレシートが複数カードに（またはその逆に）紐付かない", () => {
     const r = matchCardAndReceipts(
       [
-        card("c1", "2026-06-01", "サミット", 1000),
-        card("c2", "2026-07-01", "サミット", 1000),
-        card("c3", "2026-08-01", "サミット", 1000),
+        card("c1", "2026-08-01", "サミット", 1000),
+        card("c2", "2026-08-10", "サミット", 1000),
+        card("c3", "2026-08-20", "サミット", 1000),
       ],
-      [receipt("r1", "2026-07-15", "サミット", 1000), receipt("r2", "2026-01-01", "サミット", 1000)]
+      [receipt("r1", "2026-08-09", "サミット", 1000), receipt("r2", "2026-08-15", "サミット", 1000)]
     );
     assert.equal(r.matches.length, 2);
     assert.equal(new Set(r.matches.map((m) => m.cardId)).size, 2);
     assert.equal(new Set(r.matches.map((m) => m.receiptId)).size, 2);
-    assert.equal(r.cards.filter((c) => c.status === "unmatched").length, 1);
+    assert.deepEqual(
+      Object.fromEntries(r.matches.map((m) => [m.cardId, m.receiptId])),
+      { c2: "r1", c3: "r2" }
+    );
+    assert.equal(r.cards.find((c) => c.id === "c1")?.status, "unmatched");
+  });
+
+  test("同日・同店舗で金額違いの複数決済は、それぞれ同額のレシートと組になる", () => {
+    const r = matchCardAndReceipts(
+      [card("c1", "2026-09-12", "ｾﾌﾞﾝｲﾚﾌﾞﾝ", 660), card("c2", "2026-09-12", "ｾﾌﾞﾝｲﾚﾌﾞﾝ", 1288)],
+      [
+        receipt("r1", "2026-09-12", "セブン-イレブン 川口里中央店", 1288),
+        receipt("r2", "2026-09-12", "セブン-イレブン 川口里中央店", 660),
+      ]
+    );
+    assert.deepEqual(
+      Object.fromEntries(r.matches.map((m) => [m.cardId, m.receiptId])),
+      { c1: "r2", c2: "r1" }
+    );
   });
 
   test("時刻・タイムゾーン付きの日付でも日付単位で比較する", () => {
@@ -284,8 +405,44 @@ describe("レシート単位の扱い", () => {
   });
 });
 
+describe("取込ごとの対象期間（coverage）", () => {
+  test("202610.csv の実分布: 8/24 の4件は外れ値として除き、9/1〜9/30 を対象期間にする", () => {
+    assert.equal(CSV_202610_DATES.length, 60);
+    const segs = coverageSegments(CSV_202610_DATES);
+    assert.deepEqual(segs, [{ from: "2026-09-01", to: "2026-09-30", count: 56 }]);
+    const [cov] = buildImportCoverages(CSV_202610_DATES.map((date) => ({ date, importBatchId: "b10" })));
+    assert.deepEqual([cov.from, cov.to, cov.count], ["2026-08-24", "2026-09-30", 60]);
+  });
+
+  test("7日以上の空白で分け、1割を超える塊はどちらも残す", () => {
+    const dates = [...daily("2026-06-05", "2026-06-29"), ...daily("2026-07-10", "2026-07-25")];
+    assert.deepEqual(
+      coverageSegments(dates).map((s) => [s.from, s.to]),
+      [
+        ["2026-06-05", "2026-06-29"],
+        ["2026-07-10", "2026-07-25"],
+      ]
+    );
+    assert.equal(coverageSegments([...daily("2026-06-05", "2026-06-29"), "2026-07-02"]).length, 1, "3日の空白は同じ塊");
+  });
+
+  test("取込（importBatchId）ごとに別の期間になり、取込の間の空白は期間に含まれない", () => {
+    const covs = buildImportCoverages([
+      ...daily("2026-06-05", "2026-07-25").map((date) => ({ date, importBatchId: null })),
+      ...CSV_202610_DATES.map((date) => ({ date, importBatchId: "b10" })),
+    ]);
+    assert.deepEqual(
+      covs.map((c) => [c.batchId, c.segments.map((s) => `${s.from}~${s.to}`)]),
+      [
+        ["legacy", ["2026-06-05~2026-07-25"]],
+        ["b10", ["2026-09-01~2026-09-30"]],
+      ]
+    );
+  });
+});
+
 describe("finalizeUnmatchedReceiptsAsCash", () => {
-  const coverage = cardCoverage(["2026-06-05", "2026-07-25"]);
+  const coverage = buildImportCoverages(daily("2026-06-05", "2026-07-25").map((date) => ({ date })));
 
   test("カードCSVの期間内（最新利用日の3日以上前）だけ cash(auto) にし、最近のレシートは unmatched のまま", () => {
     const { receipts, finalizedIds } = finalizeUnmatchedReceiptsAsCash(
@@ -322,8 +479,200 @@ describe("finalizeUnmatchedReceiptsAsCash", () => {
   });
 
   test("カード明細が1件も無ければ何もしない", () => {
-    const result = finalizeUnmatchedReceiptsAsCash([receipt("r", "2026-07-01", "A", 1)], null);
+    const result = finalizeUnmatchedReceiptsAsCash([receipt("r", "2026-07-01", "A", 1)], []);
     assert.deepEqual(result.finalizedIds, []);
+  });
+
+  test("取込の間の空白（7/26〜8/31）と、外れ値の 8/24 付近のレシートは現金にしない", () => {
+    const covs = buildImportCoverages([
+      ...daily("2026-06-05", "2026-07-25").map((date) => ({ date, importBatchId: "b08" })),
+      ...CSV_202610_DATES.map((date) => ({ date, importBatchId: "b10" })),
+    ]);
+    const receipts = [
+      receipt("gap-early", "2026-07-28", "A", 100),
+      receipt("gap-mid", "2026-08-10", "A", 100),
+      receipt("etc-day", "2026-08-24", "A", 100),
+      receipt("aug-end", "2026-08-31", "A", 100),
+      receipt("sep-in", "2026-09-10", "A", 100),
+      receipt("sep-edge", "2026-09-27", "A", 100),
+      receipt("sep-recent", "2026-09-28", "A", 100),
+      receipt("oct", "2026-10-02", "A", 100),
+    ];
+    const { finalizedIds } = finalizeUnmatchedReceiptsAsCash(receipts, covs);
+    assert.deepEqual(finalizedIds, ["sep-in", "sep-edge"]);
+  });
+
+  test("税抜で読み取ったとみられるレシート（同じ店でカード金額が税込換算に当たる）は現金にしない", () => {
+    const cards = [
+      card("c1", "2026-07-10", "ビッグ・エー鳩ヶ谷駅前", 287),
+      card("c2", "2026-07-10", "セリア2529イオンモ-ル川口店", 330),
+    ];
+    const receipts = [
+      receipt("big-a", "2026-07-10", "Big-A 九鶴ヶ谷駅前店", 266),
+      receipt("seria", "2026-07-10", "Seria イオンモール川口店", 300),
+      receipt("other", "2026-07-10", "八百屋", 300),
+    ];
+    const matched = matchCardAndReceipts(cards, receipts);
+    assert.equal(matched.matches.length, 0);
+    assert.deepEqual(
+      matched.taxCandidatePairs.map((p) => [p.cardId, p.receiptId]),
+      [
+        ["c1", "big-a"],
+        ["c2", "seria"],
+      ]
+    );
+    const { finalizedIds } = finalizeUnmatchedReceiptsAsCash(matched.receipts, coverage, {
+      taxCandidatePairs: matched.taxCandidatePairs,
+    });
+    assert.deepEqual(finalizedIds, ["other"]);
+  });
+
+  test("no_csv_coverage のレシートは、期間の内側でも現金にしない", () => {
+    const { finalizedIds } = finalizeUnmatchedReceiptsAsCash(
+      [receipt("r", "2026-07-01", "A", 100, { unmatchedReason: "no_csv_coverage" })],
+      coverage
+    );
+    assert.deepEqual(finalizedIds, []);
+  });
+
+  test("現金にしたレシートの未照合の理由は消える", () => {
+    const { receipts } = finalizeUnmatchedReceiptsAsCash(
+      [receipt("r", "2026-07-01", "A", 100, { unmatchedReason: "no_candidate" })],
+      coverage
+    );
+    assert.equal(receipts[0].unmatchedReason, null);
+  });
+
+  test("余白の日数は options.marginDays で変更できる", () => {
+    const r = [receipt("r", "2026-07-20", "A", 100)];
+    assert.deepEqual(finalizeUnmatchedReceiptsAsCash(r, coverage).finalizedIds, ["r"]);
+    assert.deepEqual(finalizeUnmatchedReceiptsAsCash(r, coverage, { marginDays: 7 }).finalizedIds, []);
+  });
+});
+
+describe("税込換算の判定", () => {
+  test("8%・10%の切捨て・四捨五入・切上げ、8%と10%の混在に当たる金額だけを候補にする", () => {
+    assert.equal(isTaxInclusiveAmount(266, 287), true);
+    assert.equal(isTaxInclusiveAmount(300, 330), true);
+    assert.equal(isTaxInclusiveAmount(4149, 4486), true, "8%と10%の混在");
+    assert.equal(isTaxInclusiveAmount(1000, 1000), false, "同額は通常の突合");
+    assert.equal(isTaxInclusiveAmount(1000, 1070), false);
+    assert.equal(isTaxInclusiveAmount(1000, 1102), false);
+    assert.equal(isTaxInclusiveAmount(1000, 900), false);
+  });
+
+  test("別の店・窓の外の組は税込換算の候補にしない", () => {
+    const r = matchCardAndReceipts(
+      [card("c1", "2026-09-01", "ビッグ・エー鳩ヶ谷駅前", 287), card("c2", "2026-07-01", "セリア", 330)],
+      [receipt("r1", "2026-09-01", "ローソン", 266), receipt("r2", "2026-09-01", "Seria", 300)]
+    );
+    assert.deepEqual(r.taxCandidatePairs, []);
+  });
+});
+
+describe("誤突合の検出（自動では解除しない）", () => {
+  test("日付差が31日を超える既存の照合だけを一覧にする", () => {
+    const rows = [
+      row("c-far", "CSV", "2026-06-06", "ネクストオンライン", 3480, {
+        reconcileStatus: "matched",
+        matchedReceiptId: "g1",
+      }),
+      row("i1", "IMAGE", "2026-09-26", "銀座ロフト / A", 3000, {
+        reconcileStatus: "matched",
+        matchedCardId: "c-far",
+        receiptGroupId: "g1",
+      }),
+      row("i2", "IMAGE", "2026-09-26", "銀座ロフト / B", 480, {
+        reconcileStatus: "matched",
+        matchedCardId: "c-far",
+        receiptGroupId: "g1",
+      }),
+      row("c-ok", "CSV", "2026-09-01", "サミット", 1000, { reconcileStatus: "matched", matchedReceiptId: "r2" }),
+      row("r2", "IMAGE", "2026-08-01", "サミット", 1000, { reconcileStatus: "matched", matchedCardId: "c-ok" }),
+    ];
+    const found = findOutOfRangeMatches(rows);
+    assert.deepEqual(found, [
+      {
+        cardId: "c-far",
+        receiptRowIds: ["i1", "i2"],
+        cardDate: "2026-06-06",
+        receiptDate: "2026-09-26",
+        dateDiffDays: 112,
+      },
+    ]);
+    assert.equal(diffDays("2026-08-01", "2026-09-01"), 31);
+    assert.equal(rows[0].reconcileStatus, "matched", "入力は書き換えない");
+  });
+});
+
+describe("CSV取込の重複判定キー（日付・店名・金額・何件目か）", () => {
+  const base = [
+    { date: "2026-08-24", description: "ETC", amount: 1200 },
+    { date: "2026-08-24", description: "ETC", amount: 1200 },
+    { date: "2026-08-24", description: "ETC", amount: 850 },
+    { date: "2026-08-24", description: "ETC", amount: 1200 },
+  ];
+  const key = (r: { date: string; description: string; amount: number; dupIndex: number }) =>
+    `${r.date}|${r.description}|${r.amount}|${r.dupIndex}`;
+
+  test("同日・同店・同額の明細を取りこぼさない", () => {
+    const keys = assignDuplicateIndexes(base).map(key);
+    assert.equal(new Set(keys).size, 4);
+    assert.deepEqual(
+      assignDuplicateIndexes(base).map((r) => r.dupIndex),
+      [0, 1, 0, 2]
+    );
+  });
+
+  test("同じCSVを再取込すると同じキーになり、二重登録されない", () => {
+    const first = new Set(assignDuplicateIndexes(base).map(key));
+    const again = assignDuplicateIndexes(base).map(key);
+    assert.equal(again.filter((k) => !first.has(k)).length, 0);
+  });
+
+  test("期間が重なる別のCSVの同じ明細も同じキーになる", () => {
+    const fileA = [{ date: "2026-07-25", description: "マクドナルド", amount: 310 }];
+    const fileB = [
+      { date: "2026-07-25", description: "マクドナルド", amount: 310 },
+      { date: "2026-08-24", description: "ETC", amount: 1200 },
+    ];
+    const existing = new Set(assignDuplicateIndexes(fileA).map(key));
+    const newRows = assignDuplicateIndexes(fileB).filter((r) => !existing.has(key(r)));
+    assert.deepEqual(newRows.map((r) => r.description), ["ETC"]);
+  });
+});
+
+describe("取込完了時のメッセージ", () => {
+  test("利用日の範囲を示し、ファイル名の年月は支払月だと明記する", () => {
+    const info = describeImportCoverage({
+      fileName: "202610.csv",
+      paymentMonth: "2026-10",
+      dates: CSV_202610_DATES,
+    });
+    assert.equal(info?.from, "2026-08-24");
+    assert.equal(info?.to, "2026-09-30");
+    assert.match(info!.message, /2026\/8\/24〜2026\/9\/30/);
+    assert.match(info!.message, /202610は支払月/);
+    assert.equal(info?.warning, null);
+  });
+
+  test("未照合のレシートの期間と重ならなければ警告する", () => {
+    const disjoint = describeImportCoverage({
+      fileName: "202608.csv",
+      dates: daily("2026-07-02", "2026-07-25"),
+      unmatchedReceiptDates: ["2026-09-01", "2026-09-26"],
+    });
+    assert.match(disjoint!.warning!, /2026\/9\/1〜2026\/9\/26/);
+    const overlap = describeImportCoverage({
+      fileName: "202610.csv",
+      dates: CSV_202610_DATES,
+      unmatchedReceiptDates: ["2026-07-30", "2026-09-26"],
+    });
+    assert.equal(overlap?.warning, null);
+  });
+
+  test("利用日が無ければ null", () => {
+    assert.equal(describeImportCoverage({ dates: [] }), null);
   });
 });
 
@@ -374,7 +723,7 @@ describe("集計（二重計上の防止と現金の計上）", () => {
     const result = matchCardAndReceipts(cards.map(toCardTransaction), units);
     const finalized = finalizeUnmatchedReceiptsAsCash(
       result.receipts,
-      cardCoverage(["2026-07-01", "2026-07-25"])
+      buildImportCoverages(daily("2026-07-01", "2026-07-25").map((date) => ({ date })))
     );
     const after = applyReconcileToRows(rows, units, result.matches, finalized.finalizedIds);
 
@@ -443,6 +792,32 @@ describe("可視化のサマリー", () => {
     assert.deepEqual(s.unmatchedReceipts, { amount: 700, count: 1 });
     assert.deepEqual(s.cashConfirmed, { amount: 300, count: 1 });
     assert.deepEqual(s.cashAuto, { amount: 200, count: 1 });
+  });
+
+  test("未照合のレシートを理由別に数え、内訳の合計が未照合の合計と一致する", () => {
+    const rows = [
+      row("c1", "CSV", "2026-07-25", "マクドナルド", 310),
+      row("r1", "IMAGE", "2026-07-20", "八百屋", 800),
+      row("r2", "IMAGE", "2026-09-10", "サミット", 1200),
+      row("i1", "IMAGE", "2026-09-12", "セブン / おにぎり", 160, { receiptGroupId: "g" }),
+      row("i2", "IMAGE", "2026-09-12", "セブン / お茶", 140, { receiptGroupId: "g" }),
+    ];
+    const { units } = buildReceiptUnits(rows);
+    const result = matchCardAndReceipts(rows.filter((r) => r.source === "CSV").map(toCardTransaction), units);
+    const after = applyReconcileToRows(rows, units, result.matches, [], result.receipts);
+    const byId = Object.fromEntries(after.map((r) => [r.id, r]));
+    assert.equal(byId.r1.unmatchedReason, "no_candidate");
+    assert.equal(byId.r2.unmatchedReason, "no_csv_coverage");
+    assert.equal(byId.i2.unmatchedReason, "no_csv_coverage", "レシートの全行に理由が付く");
+
+    const s = buildReconcileSummary(after);
+    assert.deepEqual(s.unmatchedNoCandidate, { amount: 800, count: 1 });
+    assert.deepEqual(s.unmatchedNoCoverage, { amount: 1500, count: 2 });
+    assert.equal(
+      s.unmatchedNoCandidate.amount + s.unmatchedNoCoverage.amount,
+      s.unmatchedReceipts.amount
+    );
+    assert.equal(s.total, 310 + 800 + 1200 + 300, "未照合のレシートも暫定で総支出に入る");
   });
 });
 
