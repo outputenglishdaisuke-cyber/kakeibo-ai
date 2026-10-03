@@ -3,7 +3,9 @@ import {
   parseCsvToMatrix,
   buildCsvSampleForAi,
   mapMatrixToTransactions,
+  detectCsvStructure,
 } from "@/lib/csv-parser";
+import type { CsvStructureAnalysis } from "@/types";
 import { decodeCsvBuffer, CsvEncodingError } from "@/lib/csv-encoding";
 import { analyzeCsvStructure } from "@/lib/classifiers";
 import { classifyParsedTransactions } from "@/lib/classify-pipeline";
@@ -48,8 +50,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const sample = buildCsvSampleForAi(matrix, 15);
-    const structure = await analyzeCsvStructure(sample);
+    const warnings: string[] = [];
+    let structure: CsvStructureAnalysis;
+    try {
+      structure = await analyzeCsvStructure(buildCsvSampleForAi(matrix, 15));
+    } catch (err) {
+      console.warn("[/api/import] AI structure analysis failed:", err);
+      const detected = detectCsvStructure(matrix);
+      if (!detected) {
+        return NextResponse.json(
+          { error: `${STRUCTURE_ERROR}（AIが使えないため、自動推定も失敗しました）`, encoding },
+          { status: 422 }
+        );
+      }
+      structure = detected;
+      warnings.push("AIが使えないため、CSVの列はセルの内容から推定しました");
+    }
 
     const indicesInvalid =
       structure.dateColumnIndex < 0 ||
@@ -89,6 +105,8 @@ export async function POST(req: NextRequest) {
     // 個別ルール → AI 分類（デフォルトカテゴリが無ければ投入）
     const transactions = await classifyParsedTransactions(rawTransactions, {
       autoClassify: true,
+      onAiError: () =>
+        warnings.push("AIが使えないため、ルールに当てはまらない明細は未分類のままです"),
     });
 
     return NextResponse.json({
@@ -97,6 +115,7 @@ export async function POST(req: NextRequest) {
       structure,
       transactions,
       totalRows: matrix.length,
+      warnings,
     });
   } catch (err) {
     console.error("[/api/import] failed:", err);

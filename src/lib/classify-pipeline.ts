@@ -14,7 +14,9 @@ export type ClassifiedTransaction = ParsedTransaction & {
 
 export async function classifyParsedTransactions(
   transactions: ParsedTransaction[],
-  options: { autoClassify?: boolean } = { autoClassify: true }
+  options: { autoClassify?: boolean; onAiError?: (error: unknown) => void } = {
+    autoClassify: true,
+  }
 ): Promise<ClassifiedTransaction[]> {
   const categories = await ensureDefaultCategories();
   const categoryIdSet = new Set(categories.map((c) => c.id));
@@ -71,18 +73,26 @@ export async function classifyParsedTransactions(
   for (let offset = 0; offset < uncategorizedIndices.length; offset += CHUNK) {
     const chunkIndices = uncategorizedIndices.slice(offset, offset + CHUNK);
     const chunk = chunkIndices.map((i) => categorized[i]);
-    const results = await classifyTransactions(
-      chunk.map((tx) => ({ description: tx.description, amount: tx.amount })),
-      categories.map((c) => ({
-        id: c.id,
-        name: c.name,
-        color: c.color,
-        description: c.description,
-        icon: c.icon,
-        createdAt: c.createdAt,
-        updatedAt: c.updatedAt,
-      }))
-    );
+    let results: Awaited<ReturnType<typeof classifyTransactions>>;
+    try {
+      results = await classifyTransactions(
+        chunk.map((tx) => ({ description: tx.description, amount: tx.amount })),
+        categories.map((c) => ({
+          id: c.id,
+          name: c.name,
+          color: c.color,
+          description: c.description,
+          icon: c.icon,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+        }))
+      );
+    } catch (error) {
+      // AI が使えなくても取込は止めず、残りは未分類のまま返す
+      console.warn("[classify-pipeline] AI classification failed:", error);
+      options.onAiError?.(error);
+      break;
+    }
 
     results.forEach((result, j) => {
       const idx = chunkIndices[j];

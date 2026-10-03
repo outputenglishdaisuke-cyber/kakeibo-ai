@@ -109,6 +109,76 @@ export function normalizeDate(raw: string, _dateFormatHint?: string): string | n
 }
 
 /**
+ * AI を使わずに、セルの中身から日付・店名・金額の列を推定する（AI が使えない時の代替）。
+ * 判定できなければ null。
+ */
+export function detectCsvStructure(matrix: string[][]): CsvStructureAnalysis | null {
+  const width = matrix.reduce((m, r) => Math.max(m, r.length), 0);
+  const nonEmptyRows = matrix.filter((r) => r.some((c) => c));
+  if (width < 2 || nonEmptyRows.length === 0) return null;
+
+  let dateColumnIndex = -1;
+  let bestDateHits = 0;
+  for (let col = 0; col < width; col++) {
+    const hits = nonEmptyRows.filter((r) => normalizeDate(r[col] ?? "")).length;
+    if (hits > bestDateHits) {
+      bestDateHits = hits;
+      dateColumnIndex = col;
+    }
+  }
+  if (dateColumnIndex < 0 || bestDateHits < Math.max(1, nonEmptyRows.length * 0.5)) return null;
+
+  const dataRowIndices = matrix
+    .map((r, i) => (normalizeDate(r[dateColumnIndex] ?? "") ? i : -1))
+    .filter((i) => i >= 0);
+  const dataRows = dataRowIndices.map((i) => matrix[i]);
+  const minHits = dataRows.length * 0.8;
+
+  // 左端の金額列を利用金額とみなす。支払回数のような小さな数字だけの列は除く
+  let amountColumnIndex = -1;
+  for (let col = 0; col < width; col++) {
+    if (col === dateColumnIndex) continue;
+    const values = dataRows.map((r) => parseAmount(r[col] ?? "")).filter((v): v is number => v !== null);
+    if (values.length >= minHits && values.some((v) => Math.abs(v) >= 100)) {
+      amountColumnIndex = col;
+      break;
+    }
+  }
+  if (amountColumnIndex < 0) return null;
+
+  let storeColumnIndex = -1;
+  let bestDistinct = 1;
+  for (let col = 0; col < width; col++) {
+    if (col === dateColumnIndex || col === amountColumnIndex) continue;
+    const texts = dataRows
+      .map((r) => (r[col] ?? "").trim())
+      .filter((c) => c && parseAmount(c) === null && !normalizeDate(c));
+    const distinct = new Set(texts).size;
+    if (texts.length >= minHits && distinct > bestDistinct) {
+      bestDistinct = distinct;
+      storeColumnIndex = col;
+    }
+  }
+  if (storeColumnIndex < 0) return null;
+
+  return {
+    isCsv: true,
+    confidence: "medium",
+    hasHeader: false,
+    headerRowIndex: null,
+    dataStartRow: dataRowIndices[0],
+    dateColumnIndex,
+    storeColumnIndex,
+    amountColumnIndex,
+    dateFormat: "YYYY/M/D",
+    amountFormat: "",
+    skipRowIndices: [],
+    notes: "AIを使わずにセルの内容から列を推定",
+    unrecognized: false,
+  };
+}
+
+/**
  * AI の構造解析結果をもとに、全行を取引リストへ変換する。
  */
 export function mapMatrixToTransactions(

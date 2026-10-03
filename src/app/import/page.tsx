@@ -223,6 +223,7 @@ export default function ImportPage() {
 
     const merged: ParsedTransaction[] = [];
     const errors: FileFailure[] = [];
+    const warnings = new Set<string>();
     let detected = 0;
 
     for (let i = 0; i < files.length; i++) {
@@ -246,6 +247,7 @@ export default function ImportPage() {
         const txs: ParsedTransaction[] = (data.transactions ?? []).map(
           (tx: ParsedTransaction) => ({ ...tx, source: "CSV" as const })
         );
+        for (const w of data.warnings ?? []) warnings.add(w);
         merged.push(...txs);
         detected += txs.length;
         setProgress({
@@ -264,7 +266,10 @@ export default function ImportPage() {
     if (merged.length > 0) {
       setMessage({
         type: "success",
-        text: `${files.length}件中${files.length - errors.length}件のCSVから合計${merged.length}件の明細を検出し、AIがカテゴリを提案しました`,
+        text:
+          warnings.size > 0
+            ? `${files.length}件中${files.length - errors.length}件のCSVから合計${merged.length}件の明細を検出しました（${[...warnings].join("。")}）`
+            : `${files.length}件中${files.length - errors.length}件のCSVから合計${merged.length}件の明細を検出し、AIがカテゴリを提案しました`,
       });
       // カテゴリ一覧を最新化（seed直後のため）
       fetch("/api/categories")
