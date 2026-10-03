@@ -9,6 +9,7 @@ import {
   initialReconcileFields,
 } from "@/lib/reconcile";
 import { runReconciliation, type ReconcileRunResult } from "@/lib/reconcile-service";
+import { applyCardOnlyRules } from "@/lib/manual-reconcile-service";
 import type { Prisma } from "@/generated/prisma";
 import { z } from "zod";
 
@@ -214,8 +215,9 @@ export async function POST(req: NextRequest) {
     });
     const skippedCount = csvRows.length + otherRows.length - created.length;
 
-    // CSV 取込完了時: 突合（AI 判定つき）→ 現金への自動判定。レシート保存時: 突合のみ。
+    // CSV 取込完了時: 突合（AI 判定つき）→ 現金への自動判定 → レシートなし自動確定のルール。レシート保存時: 突合のみ。
     let reconcile: ReconcileRunResult | { error: string } | null = null;
+    let cardOnlyAuto: { confirmed: number; failed: number } | null = null;
     if (created.length > 0) {
       const hasCard = created.some((tx) => tx.source === "CSV");
       try {
@@ -225,6 +227,14 @@ export async function POST(req: NextRequest) {
         reconcile = {
           error: err instanceof Error ? err.message : "突合に失敗しました",
         };
+      }
+      if (hasCard) {
+        cardOnlyAuto = await applyCardOnlyRules(
+          created.filter((tx) => tx.source === "CSV").map((tx) => tx.id)
+        ).catch((err) => {
+          console.error("[/api/import/confirm] card-only rules failed:", err);
+          return null;
+        });
       }
     }
 
@@ -260,6 +270,7 @@ export async function POST(req: NextRequest) {
         aggregatedCount: Math.max(0, aggregatedCount),
         transactions: withCategory,
         reconcile,
+        cardOnlyAuto,
         importBatchIds: batchIds,
         coverageNotices,
       },

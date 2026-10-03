@@ -244,6 +244,93 @@ export default function RulesPage() {
           )}
         </CardContent>
       </Card>
+
+      <CardOnlyRulesSection />
     </div>
+  );
+}
+
+type CardOnlyRule = {
+  id: string;
+  storeKey: string;
+  storeSample: string;
+  enabled: boolean;
+  createdAt: string;
+  category: Category;
+};
+
+/** レシートなし自動確定のルール（照合画面のカード明細から登録する） */
+function CardOnlyRulesSection() {
+  const [rules, setRules] = useState<CardOnlyRule[] | null>(null);
+  const [reloadCount, setReloadCount] = useState(0);
+  const load = () => setReloadCount((n) => n + 1);
+
+  useEffect(() => {
+    fetch("/api/card-only-rules")
+      .then((res) => (res.ok ? res.json() : []))
+      .catch(() => [])
+      .then(setRules);
+  }, [reloadCount]);
+
+  const toggle = async (rule: CardOnlyRule) => {
+    await fetch(`/api/card-only-rules/${rule.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !rule.enabled }),
+    });
+    load();
+  };
+
+  const remove = async (rule: CardOnlyRule) => {
+    if (!window.confirm(`「${rule.storeSample}」のルールを削除しますか？（確定済みの明細はそのままです）`)) return;
+    await fetch(`/api/card-only-rules/${rule.id}`, { method: "DELETE" });
+    load();
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>レシートなし自動確定のルール</CardTitle>
+        <p className="text-sm text-gray-500">
+          CSV取込のとき、店名が一致するカード明細をレシートなしで自動確定します（ETC・公共料金・サブスクなど）。
+          照合画面のカード明細から登録できます。
+        </p>
+      </CardHeader>
+      <CardContent>
+        {rules === null ? (
+          <div className="py-8 text-center text-gray-400">読み込み中...</div>
+        ) : rules.length === 0 ? (
+          <div className="py-8 text-center text-gray-400">ルールがありません</div>
+        ) : (
+          <ul className="divide-y divide-gray-100">
+            {rules.map((rule) => (
+              <li key={rule.id} className="flex flex-wrap items-center gap-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="break-all font-medium text-gray-900">{rule.storeSample}</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                    <Badge color={rule.category.color}>{rule.category.name}</Badge>
+                    {!rule.enabled ? <span className="rounded bg-gray-100 px-1">無効</span> : null}
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" className="h-11 md:h-9" onClick={() => toggle(rule)}>
+                    {rule.enabled ? "無効にする" : "有効にする"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-11 w-11 md:h-9 md:w-9"
+                    onClick={() => remove(rule)}
+                    aria-label="削除"
+                  >
+                    <Trash2 className="h-4 w-4 text-red-400" />
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
   );
 }

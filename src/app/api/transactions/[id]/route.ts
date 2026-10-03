@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
-import { releaseLinks } from "@/lib/reconcile-service";
+import { isCardOnlySettled, releaseLinks } from "@/lib/reconcile-service";
+
+const CARD_ONLY_LOCKED =
+  "レシートなしで確定したカード明細の内訳です。金額・日付の変更や削除は、照合画面の「確定済み」から取り消してから行ってください";
 
 const updateSchema = z.object({
   date: z.string().optional(),
@@ -27,6 +30,12 @@ export async function PATCH(
   if (parsed.data.date) {
     data.date = new Date(parsed.data.date);
   }
+  if (
+    (parsed.data.amount !== undefined || parsed.data.date !== undefined) &&
+    (await isCardOnlySettled([id]))
+  ) {
+    return NextResponse.json({ error: CARD_ONLY_LOCKED }, { status: 409 });
+  }
 
   const transaction = await prisma.$transaction(async (tx) => {
     // 突合は金額の完全一致が前提のため、金額を変えたら紐付けを外す
@@ -50,6 +59,9 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  if (await isCardOnlySettled([id])) {
+    return NextResponse.json({ error: CARD_ONLY_LOCKED }, { status: 409 });
+  }
   await prisma.$transaction(async (tx) => {
     await releaseLinks([id], { rejectPair: false }, tx);
     await tx.transaction.delete({ where: { id } });

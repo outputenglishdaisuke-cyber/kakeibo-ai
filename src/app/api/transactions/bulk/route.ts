@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { getMonthRange } from "@/lib/utils";
-import { releaseLinks } from "@/lib/reconcile-service";
+import { isCardOnlySettled, releaseLinks } from "@/lib/reconcile-service";
 
 const bulkDeleteSchema = z.discriminatedUnion("mode", [
   z.object({
@@ -69,6 +69,15 @@ export async function DELETE(req: NextRequest) {
     let result: { count: number };
 
     if (payload.mode === "ids") {
+      if (await isCardOnlySettled(payload.ids)) {
+        return NextResponse.json(
+          {
+            error:
+              "レシートなしで確定したカード明細の内訳が含まれています。照合画面の「確定済み」から取り消してから削除してください",
+          },
+          { status: 409 }
+        );
+      }
       result = await prisma.$transaction(async (tx) => {
         await releaseLinks(payload.ids, { rejectPair: false }, tx);
         return tx.transaction.deleteMany({ where: { id: { in: payload.ids } } });

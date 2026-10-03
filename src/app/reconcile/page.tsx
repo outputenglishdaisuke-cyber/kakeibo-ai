@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn, formatCurrency, getMonthKey, shiftMonthKey } from "@/lib/utils";
 import type { ReconcileView } from "@/lib/reconcile-service";
+import type { Category } from "@/types";
+import { ReconcileWorkbench } from "@/components/reconcile/ReconcileWorkbench";
 
 type Row = {
   id: string;
@@ -118,8 +120,17 @@ export default function ReconcilePage() {
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [categories, setCategories] = useState<Category[]>([]);
   const requestKey = `${month}:${reloadCount}`;
-  const loading = loadedKey !== requestKey;
+  // 操作後の再読み込みでは画面を消さない（取り消しの案内・スクロール位置を保つ）
+  const loading = loadedKey !== requestKey && (!data || data.month !== month);
+
+  useEffect(() => {
+    fetch("/api/categories")
+      .then((res) => (res.ok ? res.json() : []))
+      .catch(() => [])
+      .then(setCategories);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -154,6 +165,26 @@ export default function ReconcilePage() {
       if (typeof json.matched === "number") {
         setMessage(`再照合しました（新たに照合${json.matched}件）`);
       }
+      setReloadCount((n) => n + 1);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 照合の解除（操作履歴に残し、「履歴」から取り消せる） */
+  const unlink = async (cardId: string) => {
+    if (!window.confirm("この照合を解除して未照合に戻しますか？")) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/reconcile/operations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operations: [{ kind: "unlink", cardId }] }),
+      });
+      const json = await res.json().catch(() => null);
+      const result = json?.results?.[0];
+      setMessage(result?.ok ? `${result.summary}（「履歴」から取り消せます）` : result?.error ?? "操作に失敗しました");
       setReloadCount((n) => n + 1);
     } finally {
       setBusy(false);
@@ -267,6 +298,11 @@ export default function ReconcilePage() {
                   value={formatCurrency(s.cashAuto.amount)}
                   sub={`${s.cashAuto.count}件`}
                 />
+                <Stat
+                  label="カードのみで確定（レシート無し）"
+                  value={formatCurrency(s.cardOnly.amount)}
+                  sub={`${s.cardOnly.count}件`}
+                />
               </div>
               {data.legacyLineItemCount > 0 ? (
                 <p className="text-xs text-gray-500">
@@ -276,6 +312,12 @@ export default function ReconcilePage() {
               ) : null}
             </CardContent>
           </Card>
+
+          <ReconcileWorkbench
+            data={data}
+            categories={categories}
+            onChanged={() => setReloadCount((n) => n + 1)}
+          />
 
           <Section
             title="CSVの取込状況"
@@ -337,12 +379,7 @@ export default function ReconcilePage() {
                         variant="ghost"
                         className={smallBtn}
                         disabled={busy}
-                        onClick={() =>
-                          act(
-                            { action: "unlink", cardId: m.cardId },
-                            "この照合を解除して未照合に戻しますか？"
-                          )
-                        }
+                        onClick={() => unlink(m.cardId)}
                       >
                         解除
                       </Button>
@@ -413,124 +450,8 @@ export default function ReconcilePage() {
               <PairList
                 pairs={data.matchedPairs.filter((p) => p.needsReview)}
                 busy={busy}
-                onUnlink={(cardId) =>
-                  act({ action: "unlink", cardId }, "この照合を解除して未照合に戻しますか？")
-                }
+                onUnlink={unlink}
               />
-            </Section>
-
-            <Section
-              title="レシート未照合のカード明細"
-              description="店名からカテゴリを推測した1件として計上しています。"
-              count={data.unmatchedCards.length}
-            >
-              <ul className="divide-y divide-gray-100">
-                {data.unmatchedCards.map((r) => (
-                  <RowLine
-                    key={r.id}
-                    row={r}
-                    action={
-                      <Button
-                        variant="ghost"
-                        className={smallBtn}
-                        disabled={busy}
-                        onClick={() => act({ action: "mark_unknown", ids: [r.id] })}
-                      >
-                        Unknownへ
-                      </Button>
-                    }
-                  />
-                ))}
-              </ul>
-            </Section>
-
-            <Section
-              title="未照合のレシート"
-              description="「CSV未取込の期間」は該当期間のCSVを取り込むと照合されます。現金への自動判定はCSV取込時に、そのCSVの範囲内だけで行います。"
-              count={data.unmatchedReceipts.length}
-            >
-              <ul className="divide-y divide-gray-100">
-                {data.unmatchedReceipts.map((r) => (
-                  <RowLine
-                    key={r.id}
-                    row={r}
-                    action={
-                      <Button
-                        variant="ghost"
-                        className={smallBtn}
-                        disabled={busy}
-                        onClick={() => act({ action: "mark_unknown", ids: [r.id] })}
-                      >
-                        Unknownへ
-                      </Button>
-                    }
-                  />
-                ))}
-              </ul>
-            </Section>
-
-            <Section
-              title="自動で現金に判定されたレシート"
-              description="カード決済だったものが紛れていないか確認してください。"
-              count={data.autoCashReceipts.length}
-            >
-              <ul className="divide-y divide-gray-100">
-                {data.autoCashReceipts.map((r) => (
-                  <RowLine
-                    key={r.id}
-                    row={r}
-                    action={
-                      <Button
-                        variant="outline"
-                        className={smallBtn}
-                        disabled={busy}
-                        onClick={() => act({ action: "revert_cash", ids: [r.id] })}
-                      >
-                        カード扱いに戻す
-                      </Button>
-                    }
-                  />
-                ))}
-              </ul>
-            </Section>
-
-            <Section
-              title="金額不一致の候補（参考）"
-              description="同じ店で金額が一致しない組です（日付差31日以内）。自動では紐付けません。「税抜で読み取った可能性」の付いたレシートは、現金への自動判定から除外しています。"
-              count={data.mismatchCandidates.length}
-            >
-              <ul className="divide-y divide-gray-100">
-                {data.mismatchCandidates.map((c) => (
-                  <li key={`${c.cardId}-${c.receipt.id}`} className="space-y-0.5 py-2 text-sm">
-                    <div className="flex justify-between gap-3">
-                      <span className="min-w-0 truncate">
-                        カード {shortDate(c.cardDate)} {c.cardStoreName}
-                      </span>
-                      <span className="flex-shrink-0 tabular-nums">
-                        {formatCurrency(c.cardAmount)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between gap-3 text-gray-600">
-                      <span className="min-w-0 truncate">
-                        レシート {shortDate(c.receipt.date)} {c.receipt.storeName}
-                        {c.receiptIsAutoCash ? (
-                          <span className="ml-1 rounded bg-amber-100 px-1 text-xs text-amber-700">
-                            自動現金
-                          </span>
-                        ) : null}
-                        {c.taxExclusiveLikely ? (
-                          <span className="ml-1 rounded bg-sky-100 px-1 text-xs text-sky-800">
-                            税抜で読み取った可能性
-                          </span>
-                        ) : null}
-                      </span>
-                      <span className="flex-shrink-0 tabular-nums">
-                        {formatCurrency(c.receipt.amount)}
-                      </span>
-                    </div>
-                  </li>
-                ))}
-              </ul>
             </Section>
 
             <Section
@@ -563,15 +484,6 @@ export default function ReconcilePage() {
               </ul>
             </Section>
 
-            <Section title="照合済み" count={data.matchedPairs.length}>
-              <PairList
-                pairs={data.matchedPairs}
-                busy={busy}
-                onUnlink={(cardId) =>
-                  act({ action: "unlink", cardId }, "この照合を解除して未照合に戻しますか？")
-                }
-              />
-            </Section>
           </div>
         </>
       )}

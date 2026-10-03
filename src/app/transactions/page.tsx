@@ -54,6 +54,8 @@ function reconcileLabel(tx: Transaction): { text: string; className: string } | 
         : { text: "現金", className: "bg-sky-50 text-sky-700" };
     case "unknown":
       return { text: "Unknown", className: "bg-gray-200 text-gray-700" };
+    case "fallback_split":
+      return { text: "カード（レシートなし）", className: "bg-violet-50 text-violet-700" };
     case "unmatched":
       return tx.source === "CSV"
         ? { text: "レシート未照合", className: "bg-orange-50 text-orange-700" }

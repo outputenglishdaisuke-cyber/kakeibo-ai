@@ -20,6 +20,7 @@ model Category {
   updatedAt    DateTime      @updatedAt
   transactions Transaction[]
   rules        Rule[]
+  cardOnlyRules CardOnlyRule[]
   budget       CategoryBudget?
 }
 
@@ -69,6 +70,8 @@ model Transaction {
   excludedReason   String?
   /** データ補正の履歴（元の値を含む）。scripts/data-corrections.ts の --revert で元に戻す */
   corrections      Json?
+  /** 手動の紐付けの単位。1枚のレシートと複数のカード明細（またはその逆）を同じIDでまとめる */
+  linkId           String?
 
   @@index([date])
   @@index([categoryId])
@@ -77,7 +80,45 @@ model Transaction {
   @@index([matchedCardId])
   @@index([receiptGroupId])
   @@index([importBatchId])
+  @@index([linkId])
   @@unique([date, description, amount, dupIndex])
+}
+
+/**
+ * 照合画面での手動操作の履歴。changes に各行の操作前後の値、createdRowIds に操作で追加した行を持ち、
+ * 取り消しは「現在の値が操作後の値のままか」を確かめてから操作前の値に戻す（追加行は excludedReason で外す）。
+ */
+model ReconcileOperation {
+  id            String    @id @default(cuid())
+  kind          String
+  /** user=画面の操作、rule=レシートなし自動確定のルール */
+  actor         String    @default("user")
+  summary       String
+  /** 操作前後の値と追加した行が関わる全行の ID（行から履歴を引くため） */
+  rowIds        String[]  @default([])
+  changes       Json
+  createdRowIds String[]  @default([])
+  ruleId        String?
+  undoneAt      DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([createdAt])
+}
+
+/** 店名（正規化後）が一致するカード明細を、CSV取込時にレシートなしで自動確定するルール */
+model CardOnlyRule {
+  id          String    @id @default(cuid())
+  storeKey    String
+  /** 登録元のカード明細の店名（表示用） */
+  storeSample String
+  categoryId  String
+  category    Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  enabled     Boolean   @default(true)
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([storeKey])
 }
 
 /**
@@ -164,7 +205,10 @@ enum PaymentMethod {
   unknown
 }
 
-/** カード明細: unmatched / matched / fallback_split、レシート: unmatched / matched / cash。unknown は返金・調整 */
+/**
+ * カード明細: unmatched / matched / fallback_split（レシートなしで確定。金額はカテゴリ別の内訳行で数える）、
+ * レシート: unmatched / matched / cash、内訳行: fallback_split。unknown は返金・調整
+ */
 enum ReconcileStatus {
   unmatched
   matched

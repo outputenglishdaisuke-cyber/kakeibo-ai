@@ -8,12 +8,12 @@ export const activeTransactionWhere: Prisma.TransactionWhereInput = {
 };
 
 /**
- * 支出として数える条件。突合済みのカード明細はレシート側（内訳）で数えるため除外する。
+ * 支出として数える条件。突合済み・レシートなしで確定したカード明細は内訳側で数えるため除外する。
  * reconcile.ts の countsTowardTotals と同じ規則。
  */
 export const countedTransactionWhere: Prisma.TransactionWhereInput = {
   ...activeTransactionWhere,
-  NOT: { source: "CSV", reconcileStatus: "matched" },
+  NOT: { source: "CSV", reconcileStatus: { in: ["matched", "fallback_split"] } },
 };
 
 export function withActiveTransactions(

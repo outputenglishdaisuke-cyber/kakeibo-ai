@@ -9,11 +9,9 @@ import {
   buildImportCoverages,
   buildReceiptUnits,
   buildReconcileSummary,
-  DEFAULT_MAX_DAYS,
   diffDays,
   finalizeUnmatchedReceiptsAsCash,
   findOutOfRangeMatches,
-  isTaxInclusiveAmount,
   LEGACY_BATCH_ID,
   matchCardAndReceipts,
   storeNameOf,
@@ -24,6 +22,11 @@ import {
   type UnmatchedReason,
 } from "@/lib/reconcile";
 import { noAutoCashReason, normalizeStoreName, ruleBasedStoreVerdict } from "@/lib/store-name";
+import {
+  cardOnlyRuleKey,
+  rankCandidates,
+  rankDuplicateCandidates,
+} from "@/lib/manual-reconcile";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -51,6 +54,8 @@ export function toLedgerRow(tx: Transaction): LedgerRow {
     unmatchedReason: tx.unmatchedReason,
     importBatchId: tx.importBatchId,
     excludedReason: tx.excludedReason,
+    linkId: tx.linkId,
+    updatedAt: tx.updatedAt.toISOString(),
   };
 }
 
@@ -283,33 +288,54 @@ export async function releaseLinks(
     where: { id: { in: rowIds }, reconcileStatus: "matched" },
   });
   const cardIds = new Set<string>();
+  const linkIds = new Set<string>();
   for (const r of rows) {
     if (r.source === "CSV") cardIds.add(r.id);
     else if (r.matchedCardId) cardIds.add(r.matchedCardId);
+    if (r.linkId) linkIds.add(r.linkId);
   }
-  for (const cardId of cardIds) {
-    const receiptRows = await db.transaction.findMany({
-      where: { matchedCardId: cardId },
+  // 手動で紐付けた組（1枚のレシートと複数のカード明細など）は、組ごと解除する
+  if (linkIds.size > 0) {
+    const linkedCards = await db.transaction.findMany({
+      where: { linkId: { in: [...linkIds] }, source: "CSV" },
+      select: { id: true },
     });
-    for (const r of receiptRows) {
-      await db.transaction.update({
-        where: { id: r.id },
-        data: {
-          reconcileStatus: "unmatched",
-          matchedCardId: null,
-          needsReview: false,
-          rejectedCardIds: options.rejectPair
-            ? [...new Set([...(r.rejectedCardIds ?? []), cardId])]
-            : r.rejectedCardIds,
-        },
-      });
-    }
-    await db.transaction.updateMany({
-      where: { id: cardId },
-      data: { reconcileStatus: "unmatched", matchedReceiptId: null, needsReview: false },
+    for (const c of linkedCards) cardIds.add(c.id);
+  }
+  const receiptRows = await db.transaction.findMany({
+    where: {
+      source: { not: "CSV" },
+      reconcileStatus: "matched",
+      OR: [{ matchedCardId: { in: [...cardIds] } }, { linkId: { in: [...linkIds] } }],
+    },
+  });
+  for (const r of receiptRows) {
+    await db.transaction.update({
+      where: { id: r.id },
+      data: {
+        reconcileStatus: "unmatched",
+        matchedCardId: null,
+        needsReview: false,
+        linkId: null,
+        rejectedCardIds: options.rejectPair
+          ? [...new Set([...(r.rejectedCardIds ?? []), ...cardIds])]
+          : r.rejectedCardIds,
+      },
     });
   }
+  await db.transaction.updateMany({
+    where: { id: { in: [...cardIds] }, reconcileStatus: "matched" },
+    data: { reconcileStatus: "unmatched", matchedReceiptId: null, needsReview: false, linkId: null },
+  });
   return cardIds.size;
+}
+
+/** レシートなしで確定したカード明細・その内訳行か（金額の変更・削除は照合画面の取り消しから行う） */
+export async function isCardOnlySettled(ids: string[], db: Db = prisma): Promise<boolean> {
+  const count = await db.transaction.count({
+    where: { id: { in: ids }, reconcileStatus: "fallback_split" },
+  });
+  return count > 0;
 }
 
 /** レシートの行IDを、同じレシート（receiptGroupId）の全行に広げる */
@@ -410,10 +436,39 @@ export async function getReconcileView(month: string) {
   const openUnits = units.filter((u) => u.status === "unmatched");
   const autoCashUnits = units.filter((u) => u.status === "cash" && u.cashSource === "auto");
 
+  const recentOps = await prisma.reconcileOperation.findMany({
+    where: { undoneAt: null, kind: { not: "undo" } },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+    select: { id: true, kind: true, rowIds: true },
+  });
+  const latestOpByRow = new Map<string, { id: string; kind: string }>();
+  for (const op of recentOps) {
+    for (const id of op.rowIds) if (!latestOpByRow.has(id)) latestOpByRow.set(id, op);
+  }
+  const undoOpOf = (rowIds: string[]) => {
+    const ops = rowIds.map((id) => latestOpByRow.get(id)).filter((o) => !!o);
+    return ops[0]?.id ?? null;
+  };
+
+  const updatedAtById = new Map(ledger.map((r) => [r.id, r.updatedAt ?? ""]));
+  const versionOf = (rowIds: string[]) =>
+    rowIds.map((id) => updatedAtById.get(id) ?? "").sort().at(-1) ?? "";
+  const unitById = new Map(units.map((u) => [u.id, u]));
+  const linkIdById = new Map(ledger.filter((r) => r.linkId).map((r) => [r.id, r.linkId]));
+
   const matchedPairs = cardRows
     .filter((r) => inMonth(r.date) && r.reconcileStatus === "matched")
     .map((card) => {
-      const unit = units.find((u) => u.cardTransactionId === card.id);
+      const unit =
+        (card.matchedReceiptId ? unitById.get(card.matchedReceiptId) : undefined) ??
+        units.find((u) => u.cardTransactionId === card.id);
+      const linkedCards = card.linkId ? cardRows.filter((c) => c.linkId === card.linkId) : [card];
+      const linkedUnits = card.linkId
+        ? units.filter((u) => u.rowIds.some((id) => linkIdById.get(id) === card.linkId))
+        : unit
+          ? [unit]
+          : [];
       return {
         cardId: card.id,
         cardDate: card.date,
@@ -421,31 +476,105 @@ export async function getReconcileView(month: string) {
         amount: card.amount,
         receiptDate: unit?.date ?? null,
         receiptStoreName: unit?.storeName ?? null,
+        receiptAmount: linkedUnits.reduce((s, u) => s + u.amount, 0),
+        linkedCardCount: linkedCards.length,
+        linkedReceiptCount: linkedUnits.length,
         dateDiffDays: unit ? diffDays(card.date, unit.date) : null,
         needsReview: card.needsReview,
+        manual: !!card.linkId,
+        undoOpId: card.linkId ? undoOpOf([card.id]) : null,
+        version: versionOf([card.id]),
       };
     });
 
-  const mismatchCandidates = unmatchedCards
-    .flatMap((card) =>
-      [...openUnits, ...autoCashUnits]
-        .filter((u) => u.amount !== card.amount)
-        .filter((u) => Math.abs(diffDays(card.date, u.date)) <= DEFAULT_MAX_DAYS)
-        .filter((u) => judge(card.description, u.storeName) === "same")
-        .map((u) => ({
-          cardId: card.id,
-          cardDate: card.date,
-          cardStoreName: card.description,
-          cardAmount: card.amount,
-          receipt: unitView(u),
-          receiptIsAutoCash: u.status === "cash",
-          taxExclusiveLikely: isTaxInclusiveAmount(u.amount, card.amount),
-          amountDiff: u.amount - card.amount,
-          dateDiffDays: diffDays(card.date, u.date),
-        }))
-    )
-    .sort((a, b) => Math.abs(a.dateDiffDays) - Math.abs(b.dateDiffDays))
-    .slice(0, 30);
+  const openCardRows = cardRows.filter((r) => r.reconcileStatus === "unmatched" && r.amount > 0);
+  const cardPool = openCardRows.map((r) => ({
+    id: r.id,
+    date: r.date,
+    storeName: r.description,
+    amount: r.amount,
+  }));
+  const receiptPool = [...openUnits, ...autoCashUnits].map((u) => ({
+    id: u.rowIds[0],
+    date: u.date,
+    storeName: u.storeName,
+    amount: u.amount,
+  }));
+  const duplicatePool = units.map((u) => ({
+    id: u.rowIds[0],
+    date: u.date,
+    storeName: u.storeName,
+    amount: u.amount,
+  }));
+  const receiptItem = (u: ReceiptUnit) => {
+    const source = { id: u.rowIds[0], date: u.date, storeName: u.storeName, amount: u.amount };
+    return {
+      ...unitView(u),
+      kind: "receipt" as const,
+      autoCash: u.status === "cash",
+      version: versionOf(u.rowIds),
+      candidates: rankCandidates("receipt", source, cardPool, judge),
+      duplicateCandidates: rankDuplicateCandidates(source, duplicatePool),
+    };
+  };
+
+  const childrenByCard = new Map<string, LedgerRow[]>();
+  for (const r of ledger) {
+    if (r.source === "CSV" || r.reconcileStatus !== "fallback_split" || !r.matchedCardId) continue;
+    childrenByCard.set(r.matchedCardId, [...(childrenByCard.get(r.matchedCardId) ?? []), r]);
+  }
+  const cardOnlySettled = cardRows
+    .filter((r) => inMonth(r.date) && r.reconcileStatus === "fallback_split")
+    .map((card) => {
+      const parts = childrenByCard.get(card.id) ?? [];
+      const source = { id: card.id, date: card.date, storeName: card.description, amount: card.amount };
+      return {
+        id: card.id,
+        date: card.date,
+        storeName: card.description,
+        amount: card.amount,
+        parts: parts.map((p) => ({ id: p.id, categoryId: p.categoryId ?? null, amount: p.amount })),
+        hasReceiptCandidate: rankCandidates("card", source, receiptPool, judge).some(
+          (c) => c.exact && c.sameStore
+        ),
+        undoOpId: undoOpOf([card.id]),
+      };
+    });
+
+  const cashConfirmed = units
+    .filter((u) => inMonth(u.date) && u.status === "cash" && u.cashSource === "confirmed")
+    .map((u) => ({ ...unitView(u), undoOpId: undoOpOf(u.rowIds) }));
+
+  const duplicateRows = await prisma.transaction.findMany({
+    where: { excludedReason: { startsWith: "manual_duplicate:" }, archived: false, deletedAt: null },
+    orderBy: [{ date: "asc" }, { id: "asc" }],
+  });
+  const duplicateUnits = new Map<string, Transaction[]>();
+  for (const r of duplicateRows) {
+    const key = r.receiptGroupId ?? r.id;
+    duplicateUnits.set(key, [...(duplicateUnits.get(key) ?? []), r]);
+  }
+  const duplicatesExcluded = [...duplicateUnits.values()]
+    .map((rows) => ({
+      id: rows[0].id,
+      date: rows[0].date.toISOString().slice(0, 10),
+      storeName: storeNameOf(rows[0].description),
+      amount: rows.reduce((s, r) => s + r.amount, 0),
+      partnerId: rows[0].excludedReason!.slice("manual_duplicate:".length),
+      undoOpId: undoOpOf(rows.map((r) => r.id)),
+    }))
+    .filter((d) => inMonth(d.date));
+
+  const operations = (
+    await prisma.reconcileOperation.findMany({ orderBy: { createdAt: "desc" }, take: 50 })
+  ).map((op) => ({
+    id: op.id,
+    kind: op.kind,
+    actor: op.actor,
+    summary: op.summary,
+    createdAt: op.createdAt.toISOString(),
+    undoneAt: op.undoneAt?.toISOString() ?? null,
+  }));
 
   const openCardNames = new Set(
     cardRows.filter((r) => r.reconcileStatus === "unmatched").map((r) => normalizeStoreName(r.description))
@@ -512,14 +641,36 @@ export async function getReconcileView(month: string) {
     summary: buildReconcileSummary(monthRows),
     unmatchedCards: unmatchedCards.map((r) => ({
       id: r.id,
+      kind: "card" as const,
       date: r.date,
       storeName: r.description,
       amount: r.amount,
+      categoryId: r.categoryId ?? null,
+      version: versionOf([r.id]),
+      noAutoCash: noAutoCashReason(r.description),
+      ruleKey: cardOnlyRuleKey(r.description),
+      candidates:
+        r.amount > 0
+          ? rankCandidates(
+              "card",
+              { id: r.id, date: r.date, storeName: r.description, amount: r.amount },
+              receiptPool,
+              judge
+            )
+          : [],
     })),
-    unmatchedReceipts: openUnits.filter((u) => inMonth(u.date)).map(unitView),
-    autoCashReceipts: autoCashUnits.filter((u) => inMonth(u.date)).map(unitView),
+    unmatchedReceipts: openUnits.filter((u) => inMonth(u.date)).map(receiptItem),
+    autoCashReceipts: autoCashUnits.filter((u) => inMonth(u.date)).map(receiptItem),
+    /** 紐付けの候補（カード明細・レシートの代表行）の版。操作時に送り、同時操作を検知する */
+    versions: Object.fromEntries([
+      ...openCardRows.map((r) => [r.id, versionOf([r.id])] as const),
+      ...[...openUnits, ...autoCashUnits].map((u) => [u.rowIds[0], versionOf(u.rowIds)] as const),
+    ]),
     matchedPairs,
-    mismatchCandidates,
+    cardOnlySettled,
+    cashConfirmed,
+    duplicatesExcluded,
+    operations,
     undeterminedPairs,
     unknownRows: monthRows
       .filter((r) => r.reconcileStatus === "unknown")
