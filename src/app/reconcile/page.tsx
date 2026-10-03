@@ -14,6 +14,7 @@ type Row = {
   amount: number;
   rowCount?: number;
   reason?: "no_csv_coverage" | "no_candidate" | null;
+  noAutoCash?: string | null;
 };
 
 const REASON_LABEL = {
@@ -80,6 +81,14 @@ function RowLine({ row, action }: { row: Row; action?: ReactNode }) {
               )}
             >
               {REASON_LABEL[row.reason]}
+            </span>
+          ) : null}
+          {row.noAutoCash ? (
+            <span
+              className="ml-2 rounded bg-violet-100 px-1 text-violet-800"
+              title="カード明細は通行ごとに通行日で計上されるため、照合できなくても自動で現金にしません"
+            >
+              {row.noAutoCash}：自動で現金にしない
             </span>
           ) : null}
         </p>

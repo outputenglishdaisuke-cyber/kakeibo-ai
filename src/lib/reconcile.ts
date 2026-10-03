@@ -1,6 +1,7 @@
 import { parseReceiptItemsMemo } from "@/lib/receipt-aggregation";
 import {
   compareStoreNames,
+  noAutoCashReason,
   ruleBasedStoreVerdict,
   type StoreSimilarityOptions,
 } from "@/lib/store-name";
@@ -391,6 +392,7 @@ export function finalizeUnmatchedReceiptsAsCash(
       receipt.paymentMethod !== "cash" &&
       receipt.unmatchedReason !== "no_csv_coverage" &&
       !receipt.autoCashExempt &&
+      !noAutoCashReason(receipt.storeName) &&
       !awaitingJudgement.has(receipt.id) &&
       covered(receipt.date.slice(0, 10));
     if (!target) return receipt;
@@ -561,10 +563,14 @@ export interface LedgerRow {
   rejectedCardIds: string[];
   unmatchedReason?: UnmatchedReason | null;
   importBatchId?: string | null;
+  /** 二重登録などで集計から外した理由（null 以外は集計・突合の対象外） */
+  excludedReason?: string | null;
 }
 
-export function isActiveRow(row: Pick<LedgerRow, "archived" | "deletedAt" | "confirmed">) {
-  return !row.archived && !row.deletedAt && row.confirmed !== false;
+export function isActiveRow(
+  row: Pick<LedgerRow, "archived" | "deletedAt" | "confirmed" | "excludedReason">
+) {
+  return !row.archived && !row.deletedAt && !row.excludedReason && row.confirmed !== false;
 }
 
 /**
@@ -572,7 +578,10 @@ export function isActiveRow(row: Pick<LedgerRow, "archived" | "deletedAt" | "con
  * 現金・未照合のカード明細・未突合のレシート・Unknown はそのまま数える。
  */
 export function countsTowardTotals(
-  row: Pick<LedgerRow, "archived" | "deletedAt" | "confirmed" | "source" | "reconcileStatus">
+  row: Pick<
+    LedgerRow,
+    "archived" | "deletedAt" | "confirmed" | "excludedReason" | "source" | "reconcileStatus"
+  >
 ): boolean {
   if (!isActiveRow(row)) return false;
   return !(row.source === "CSV" && row.reconcileStatus === "matched");

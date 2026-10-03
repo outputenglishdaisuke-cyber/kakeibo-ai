@@ -468,6 +468,14 @@ describe("finalizeUnmatchedReceiptsAsCash", () => {
     assert.equal(byId.exempt.status, "unmatched");
   });
 
+  test("ETC のレシートは、カード明細が見つからなくても現金にしない", () => {
+    const { finalizedIds } = finalizeUnmatchedReceiptsAsCash(
+      [receipt("etc", "2026-07-01", "ETC", 4570), receipt("sketch", "2026-07-01", "Sketch Cafe", 500)],
+      coverage
+    );
+    assert.deepEqual(finalizedIds, ["sketch"]);
+  });
+
   test("金額が一致するカード明細があり店名が判定待ちのレシートは、現金にしない", () => {
     const cards = [card("c1", "2026-07-01", "ビッグ・エー鳩ヶ谷駅前", 910)];
     const receipts = [receipt("r1", "2026-07-01", "Big-A", 910), receipt("r2", "2026-07-01", "八百屋", 300)];
@@ -749,8 +757,11 @@ describe("集計（二重計上の防止と現金の計上）", () => {
         deletedAt: new Date(),
       }),
       row("a1", "IMAGE", "2026-06-08", "旧品目", 100, { archived: true }),
+      row("d1", "IMAGE", "2026-09-10", "Big-A", 1288, { excludedReason: "duplicate_receipt" }),
     ];
     assert.equal(total(rows), 0);
+    assert.equal(buildReconcileSummary(rows).unmatchedReceipts.count, 0);
+    assert.equal(buildReceiptUnits(rows).units.length, 0, "除外した行は突合の対象にもしない");
   });
 });
 

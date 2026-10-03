@@ -1,6 +1,8 @@
 import {
   STORE_ALIAS_GROUPS,
+  STORE_DIFFERENT_PAIRS,
   STORE_FACILITY_GROUPS,
+  STORE_NO_AUTO_CASH,
   STORE_PLACE_TOKENS,
 } from "@/lib/store-aliases";
 
@@ -137,6 +139,40 @@ function facilityVerdict(cardName: string, receiptName: string): "same" | "diffe
   return null;
 }
 
+/** 英数字だけのキーワードは語の境界で、それ以外は部分一致で探す（「ETC」が「Sketch」に当たらないように） */
+function makeKeywordMatcher(keyword: string): (raw: string) => boolean {
+  const k = normalizeFull(keyword);
+  if (/^[a-z0-9]+$/.test(k)) {
+    const re = new RegExp(`(^|[^a-z0-9])${k}([^a-z0-9]|$)`);
+    return (raw) => re.test(preNormalize(raw));
+  }
+  return (raw) => normalizeFull(raw).includes(k);
+}
+
+const DIFFERENT_PAIRS = STORE_DIFFERENT_PAIRS.map((p) => ({
+  a: p.a.map(makeKeywordMatcher),
+  b: p.b.map(makeKeywordMatcher),
+}));
+
+/** 別の店として登録した組に当たるか（向きは問わない） */
+function isRegisteredDifferent(x: string, y: string): boolean {
+  return DIFFERENT_PAIRS.some(
+    (p) =>
+      (p.a.some((m) => m(x)) && p.b.some((m) => m(y))) ||
+      (p.a.some((m) => m(y)) && p.b.some((m) => m(x)))
+  );
+}
+
+const NO_AUTO_CASH = STORE_NO_AUTO_CASH.map((g) => ({
+  matchers: g.keywords.map(makeKeywordMatcher),
+  reason: g.reason,
+}));
+
+/** 現金への自動判定をしない店なら、その理由（例: "ETC"） */
+export function noAutoCashReason(storeName: string): string | null {
+  return NO_AUTO_CASH.find((g) => g.matchers.some((m) => m(storeName)))?.reason ?? null;
+}
+
 export function longestCommonSubstringLength(a: string, b: string): number {
   if (!a || !b) return 0;
   let best = 0;
@@ -197,9 +233,10 @@ export function compareStoreNames(
 }
 
 /**
- * 設定（別名辞書・施設名）と文字列の類似度で決まる店名の判定。
+ * 設定（別名辞書・施設名・別の店の組）と文字列の類似度で決まる店名の判定。
  * 正規化後に同じ・施設内のテナント・同じ別名グループ・文字列が類似 → same、
- * 除外された別の施設・別々の別名グループ → different、どれにも当たらなければ null（AI やユーザーの判定に回す）。
+ * 別の店として登録した組・除外された別の施設・別々の別名グループ → different、
+ * どれにも当たらなければ null（AI やユーザーの判定に回す）。
  */
 export function ruleBasedStoreVerdict(
   cardName: string,
@@ -208,6 +245,7 @@ export function ruleBasedStoreVerdict(
 ): "same" | "different" | null {
   const a = normalizeStoreName(cardName);
   if (a && a === normalizeStoreName(receiptName)) return "same";
+  if (isRegisteredDifferent(cardName, receiptName)) return "different";
   const facility = facilityVerdict(cardName, receiptName);
   if (facility) return facility;
   const ga = storeAliasGroup(cardName);

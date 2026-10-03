@@ -23,7 +23,7 @@ import {
   type StoreJudge,
   type UnmatchedReason,
 } from "@/lib/reconcile";
-import { normalizeStoreName, ruleBasedStoreVerdict } from "@/lib/store-name";
+import { noAutoCashReason, normalizeStoreName, ruleBasedStoreVerdict } from "@/lib/store-name";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -50,12 +50,13 @@ export function toLedgerRow(tx: Transaction): LedgerRow {
     rejectedCardIds: tx.rejectedCardIds ?? [],
     unmatchedReason: tx.unmatchedReason,
     importBatchId: tx.importBatchId,
+    excludedReason: tx.excludedReason,
   };
 }
 
 async function loadLedger(db: Db = prisma): Promise<LedgerRow[]> {
   const rows = await db.transaction.findMany({
-    where: { archived: false, deletedAt: null, confirmed: true },
+    where: { archived: false, deletedAt: null, excludedReason: null, confirmed: true },
     orderBy: [{ date: "asc" }, { id: "asc" }],
   });
   return rows.map(toLedgerRow);
@@ -139,7 +140,11 @@ export async function runReconciliation(options: {
           verdict: j.verdict as "same" | "different",
           note: j.reason,
         }));
-      const answers = await judgeStorePairsWithAi([...toAsk.values()], examples);
+      // AI が使えない（クレジット切れ・通信エラー）ときは、判定待ちのまま残して取込を続ける。次回の取込で再判定する
+      const answers = await judgeStorePairsWithAi([...toAsk.values()], examples).catch((error) => {
+        console.warn("店名のAI判定に失敗したため、判定待ちのまま残します", error);
+        return [];
+      });
       for (const a of answers) {
         await saveJudgement({
           cardSample: a.cardName,
@@ -366,7 +371,11 @@ type RowView = {
   amount: number;
 };
 
-function unitView(u: ReceiptUnit): RowView & { rowCount: number; reason: UnmatchedReason | null } {
+function unitView(u: ReceiptUnit): RowView & {
+  rowCount: number;
+  reason: UnmatchedReason | null;
+  noAutoCash: string | null;
+} {
   return {
     id: u.rowIds[0],
     date: u.date,
@@ -374,6 +383,7 @@ function unitView(u: ReceiptUnit): RowView & { rowCount: number; reason: Unmatch
     amount: u.amount,
     rowCount: u.rowIds.length,
     reason: u.unmatchedReason ?? null,
+    noAutoCash: noAutoCashReason(u.storeName),
   };
 }
 

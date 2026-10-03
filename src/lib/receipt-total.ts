@@ -6,6 +6,27 @@ const MAX_TAX_RATE = 0.1;
 export const TAX_LINE_LABEL = "消費税";
 export const ADJUST_LINE_LABEL = "調整（レシート合計との差）";
 
+/** 読み取った日付がこの年数より前なら、年の読み違い（例: 令和8年を令和6年）を疑う */
+const MAX_PAST_YEARS = 2;
+
+/**
+ * 読み取った日付が未来、または2年以上前なら確認を促す文言を返す（純関数）。
+ * today は YYYY-MM-DD（日本時間の今日）。
+ */
+export function receiptDateWarning(date: string, today: string): string | null {
+  const d = date.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  if (d > today) {
+    return `レシートの日付（${d}）が未来になっています。年や月の読み取りを確認してください`;
+  }
+  const [y, m, day] = today.split("-").map(Number);
+  const limit = `${y - MAX_PAST_YEARS}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  if (d < limit) {
+    return `レシートの日付（${d}）が${MAX_PAST_YEARS}年以上前です。年の読み取り（和暦の読み違いなど）を確認してください`;
+  }
+  return null;
+}
+
 /**
  * レシートの品目を、税込の支払合計（receiptTotal）に揃える（純関数）。
  * 税抜表示の店では品目の合計が税抜になり、カード明細の金額と一致しないため、

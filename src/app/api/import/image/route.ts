@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extractTransactionsFromImage } from "@/lib/classifiers";
 import { ensureDefaultCategories } from "@/lib/default-categories";
-import { alignReceiptToTotal } from "@/lib/receipt-total";
+import { alignReceiptToTotal, receiptDateWarning } from "@/lib/receipt-total";
 import type { ParsedTransaction } from "@/types";
 
 /**
@@ -72,6 +72,14 @@ export async function POST(req: NextRequest) {
     const receiptTotal = items.find((i) => i.receiptTotal != null)?.receiptTotal ?? null;
     const aligned = alignReceiptToTotal(items, receiptTotal);
     const extracted = aligned.items;
+    const todayJst = new Date(Date.now() + 9 * 3_600_000).toISOString().slice(0, 10);
+    const dateWarnings = [
+      ...new Set(
+        extracted
+          .map((tx) => receiptDateWarning(tx.date, todayJst))
+          .filter((w): w is string => !!w)
+      ),
+    ];
 
     const receiptGroupId = `receipt-${Date.now()}-${Math.random()
       .toString(36)
@@ -107,7 +115,7 @@ export async function POST(req: NextRequest) {
       transactions,
       receiptTotal,
       taxAdjustment: aligned.adjustment,
-      warnings: aligned.warning ? [aligned.warning] : [],
+      warnings: [...(aligned.warning ? [aligned.warning] : []), ...dateWarnings],
     });
   } catch (err) {
     const message =

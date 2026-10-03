@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtractedImageTransaction } from "@/types";
-import { alignReceiptToTotal } from "./receipt-total";
+import { alignReceiptToTotal, receiptDateWarning } from "./receipt-total";
 
 const item = (itemName: string | null, amount: number, categoryName: string | null = "食費"): ExtractedImageTransaction => ({
   date: "2026-09-01",
@@ -77,5 +77,15 @@ describe("レシートを税込の合計にそろえる", () => {
     const r = alignReceiptToTotal([item("たまごサンド", 198), item("値引", -40), item("うなぎ", 798)], 1031);
     assert.equal(sum(r.items), 1031);
     assert.equal(r.warning, null);
+  });
+});
+
+describe("読み取った日付の確認", () => {
+  test("未来の日付・2年以上前の日付は確認を促し、それ以外は何も出さない", () => {
+    assert.match(receiptDateWarning("2026-10-04", "2026-10-03") ?? "", /未来/);
+    assert.match(receiptDateWarning("2024-07-09", "2026-10-03") ?? "", /2年以上前/);
+    assert.equal(receiptDateWarning("2024-10-03", "2026-10-03"), null);
+    assert.equal(receiptDateWarning("2026-10-03", "2026-10-03"), null);
+    assert.equal(receiptDateWarning("2026-07-09", "2026-10-03"), null);
   });
 });

@@ -1,9 +1,10 @@
 import type { Prisma } from "@/generated/prisma";
 
-/** 一覧・集計のデフォルト条件（集約で退避した旧品目・削除した Unknown は除外） */
+/** 一覧・集計のデフォルト条件（集約で退避した旧品目・削除した Unknown・二重登録などで除外した行は除く） */
 export const activeTransactionWhere: Prisma.TransactionWhereInput = {
   archived: false,
   deletedAt: null,
+  excludedReason: null,
 };
 
 /**

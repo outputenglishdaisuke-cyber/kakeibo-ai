@@ -65,6 +65,10 @@ model Transaction {
   importBatch      CardImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
   /** CSV取込の重複判定用。同じ日付・店名・金額の明細が同じCSVに複数ある場合の何件目か */
   dupIndex         Int             @default(0)
+  /** 二重登録などで集計から外した理由。null 以外は一覧・集計・突合から除外（行は残し、null に戻せば元に戻る） */
+  excludedReason   String?
+  /** データ補正の履歴（元の値を含む）。scripts/data-corrections.ts の --revert で元に戻す */
+  corrections      Json?
 
   @@index([date])
   @@index([categoryId])
