@@ -86,6 +86,7 @@ describe("設定（別名辞書・施設名）", () => {
   test("カードの「イオンモール川口」は施設内テナント（イオンスタイル川口など）と照合し、前川は別の施設", () => {
     assert.equal(ruleBasedStoreVerdict("イオンモール川口", "イオンスタイル川口"), "same");
     assert.equal(ruleBasedStoreVerdict("イオンモール川口", "無印良品 イオンモール川口"), "same");
+    assert.equal(ruleBasedStoreVerdict("イオンモール川口", "ローストビーフとハンバーグ YOSHIMI 川口店"), "same");
     assert.equal(isFacilityTenant("イオンモール川口", "ダイソー イオンモール川口前川店"), false);
     assert.equal(ruleBasedStoreVerdict("イオンモール川口", "イオンモール川口前川"), "different");
     assert.equal(ruleBasedStoreVerdict("イオンモール川口", "ダイソー イオンモール川口前川店"), "different");

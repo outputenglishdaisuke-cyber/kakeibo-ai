@@ -29,7 +29,8 @@ export const STORE_FACILITY_GROUPS: {
 }[] = [
   {
     card: "イオンモール川口",
-    receiptKeywords: ["イオンモール川口", "イオンスタイル川口"],
+    // レシートに施設名が載らないテナントは店名で指定する（YOSHIMI 川口店はイオンモール川口1階）
+    receiptKeywords: ["イオンモール川口", "イオンスタイル川口", "YOSHIMI 川口"],
     excludeKeywords: ["イオンモール川口前川"],
   },
 ];
