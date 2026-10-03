@@ -565,6 +565,10 @@ export interface LedgerRow {
   importBatchId?: string | null;
   /** 二重登録などで集計から外した理由（null 以外は集計・突合の対象外） */
   excludedReason?: string | null;
+  /** 手動の紐付けの単位（1枚のレシートと複数のカード明細など） */
+  linkId?: string | null;
+  /** 楽観的な同時操作の検知に使う（ISO 文字列） */
+  updatedAt?: string;
 }
 
 export function isActiveRow(
@@ -573,8 +577,11 @@ export function isActiveRow(
   return !row.archived && !row.deletedAt && !row.excludedReason && row.confirmed !== false;
 }
 
+/** 金額を内訳側（レシート・カテゴリ別の内訳行）で数えるカード明細の状態 */
+export const CARD_STATUSES_COUNTED_BY_BREAKDOWN: ReconcileStatus[] = ["matched", "fallback_split"];
+
 /**
- * 集計に含めるか。突合済みのカード明細はレシート側（内訳）で数えるため除外する。
+ * 集計に含めるか。突合済み・レシートなしで確定したカード明細は内訳側で数えるため除外する。
  * 現金・未照合のカード明細・未突合のレシート・Unknown はそのまま数える。
  */
 export function countsTowardTotals(
@@ -584,7 +591,7 @@ export function countsTowardTotals(
   >
 ): boolean {
   if (!isActiveRow(row)) return false;
-  return !(row.source === "CSV" && row.reconcileStatus === "matched");
+  return !(row.source === "CSV" && CARD_STATUSES_COUNTED_BY_BREAKDOWN.includes(row.reconcileStatus));
 }
 
 /** 店名部分（「店名 / 品目」の店名） */
@@ -729,6 +736,8 @@ export interface ReconcileSummary {
   adjustment: number;
   cardStatement: AmountCount;
   matched: AmountCount;
+  /** レシートなしで確定したカード明細 */
+  cardOnly: AmountCount;
   unmatchedCards: AmountCount;
   unmatchedReceipts: AmountCount;
   /** 未突合のレシートのうち、前後に取込済みのカード明細が無いもの */
@@ -767,6 +776,7 @@ export function buildReconcileSummary(rows: LedgerRow[]): ReconcileSummary {
     adjustment: 0,
     cardStatement: zero(),
     matched: zero(),
+    cardOnly: zero(),
     unmatchedCards: zero(),
     unmatchedReceipts: zero(),
     unmatchedNoCoverage: zero(),
@@ -783,6 +793,7 @@ export function buildReconcileSummary(rows: LedgerRow[]): ReconcileSummary {
     if (isCard) {
       add(s.cardStatement, row.amount);
       if (status === "matched") add(s.matched, row.amount);
+      if (status === "fallback_split") add(s.cardOnly, row.amount);
       if (status === "unmatched") add(s.unmatchedCards, row.amount);
     } else {
       const receiptKey = row.receiptGroupId ?? row.id;
@@ -804,7 +815,7 @@ export function buildReconcileSummary(rows: LedgerRow[]): ReconcileSummary {
     s.total += row.amount;
     if (status === "unknown") s.adjustment += row.amount;
     else if (status === "cash") s.cash += row.amount;
-    else if (isCard || status === "matched") s.card += row.amount;
+    else if (isCard || status === "matched" || status === "fallback_split") s.card += row.amount;
     else s.provisional += row.amount;
   }
   return s;
