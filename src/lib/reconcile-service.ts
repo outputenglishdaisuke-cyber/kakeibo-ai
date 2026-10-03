@@ -186,6 +186,7 @@ export async function runReconciliation(options: {
     ]);
   }
 
+  // 突合が多いと既定の5秒を超える（本番 DB は1クエリごとに往復がかかる）
   await prisma.$transaction(async (tx) => {
     for (const [reason, rowIds] of reasonChanges) {
       await tx.transaction.updateMany({
@@ -225,7 +226,7 @@ export async function runReconciliation(options: {
         },
       });
     }
-  });
+  }, { timeout: 60_000, maxWait: 10_000 });
 
   return {
     matched: result.matches.length,
