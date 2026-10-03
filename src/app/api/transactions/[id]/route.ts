@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { releaseLinks } from "@/lib/reconcile-service";
 
 const updateSchema = z.object({
   date: z.string().optional(),
@@ -27,10 +28,19 @@ export async function PATCH(
     data.date = new Date(parsed.data.date);
   }
 
-  const transaction = await prisma.transaction.update({
-    where: { id },
-    data,
-    include: { category: true },
+  const transaction = await prisma.$transaction(async (tx) => {
+    // 突合は金額の完全一致が前提のため、金額を変えたら紐付けを外す
+    if (parsed.data.amount !== undefined) {
+      const current = await tx.transaction.findUnique({ where: { id } });
+      if (current && current.amount !== parsed.data.amount) {
+        await releaseLinks([id], { rejectPair: false }, tx);
+      }
+    }
+    return tx.transaction.update({
+      where: { id },
+      data,
+      include: { category: true },
+    });
   });
   return NextResponse.json(transaction);
 }
@@ -40,6 +50,9 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  await prisma.transaction.delete({ where: { id } });
+  await prisma.$transaction(async (tx) => {
+    await releaseLinks([id], { rejectPair: false }, tx);
+    await tx.transaction.delete({ where: { id } });
+  });
   return new NextResponse(null, { status: 204 });
 }

@@ -417,6 +417,16 @@ export default function ImportPage() {
       if (skippedCount > 0) {
         parts.push(`重複${skippedCount}件を除外`);
       }
+      const reconcile = data.reconcile;
+      if (reconcile?.error) {
+        parts.push(`レシート照合に失敗しました（${reconcile.error}）`);
+      } else if (reconcile) {
+        const r: string[] = [];
+        if (reconcile.matched > 0) r.push(`照合${reconcile.matched}件`);
+        if (reconcile.finalizedCash > 0) r.push(`現金に自動判定${reconcile.finalizedCash}件`);
+        if (reconcile.unresolvedPairs > 0) r.push(`店名の判定不可${reconcile.unresolvedPairs}組`);
+        if (r.length > 0) parts.push(`レシート照合: ${r.join("・")}（「照合」画面で確認できます）`);
+      }
       setMessage({
         type: "success",
         text: parts.join("。"),

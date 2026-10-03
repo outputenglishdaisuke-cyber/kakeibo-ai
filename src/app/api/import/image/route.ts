@@ -84,6 +84,7 @@ export async function POST(req: NextRequest) {
         receiptGroupId,
         storeName: tx.storeName ?? null,
         itemName: tx.itemName ?? null,
+        paymentMethod: tx.paymentMethod ?? "unknown",
       };
     });
 

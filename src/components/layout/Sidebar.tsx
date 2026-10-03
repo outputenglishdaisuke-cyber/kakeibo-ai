@@ -8,6 +8,7 @@ import {
   Upload,
   Tag,
   BookOpen,
+  ReceiptText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -15,6 +16,7 @@ const navItems = [
   { href: "/", label: "ダッシュボード", shortLabel: "ホーム", icon: LayoutDashboard },
   { href: "/transactions", label: "明細一覧", shortLabel: "明細", icon: List },
   { href: "/import", label: "データ取り込み", shortLabel: "取込", icon: Upload },
+  { href: "/reconcile", label: "カード照合", shortLabel: "照合", icon: ReceiptText },
   { href: "/categories", label: "カテゴリ管理", shortLabel: "分類", icon: Tag },
   { href: "/rules", label: "ルール管理", shortLabel: "ルール", icon: BookOpen },
 ];

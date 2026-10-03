@@ -21,6 +21,10 @@ export interface Transaction {
   memo?: string | null;
   confirmed: boolean;
   archived?: boolean;
+  paymentMethod?: PaymentMethod | null;
+  reconcileStatus?: "unmatched" | "matched" | "fallback_split" | "cash" | "unknown";
+  cashSource?: "confirmed" | "auto" | null;
+  needsReview?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -83,7 +87,11 @@ export interface ParsedTransaction {
   storeName?: string | null;
   /** レシート上の品目名（品目分割時） */
   itemName?: string | null;
+  /** レシートから読み取った支払方法（現金と分かれば cash） */
+  paymentMethod?: PaymentMethod | null;
 }
+
+export type PaymentMethod = "credit_card" | "cash" | "unknown";
 
 /** Vision OCR が返す抽出結果（分類前） */
 export interface ExtractedImageTransaction {
@@ -92,6 +100,7 @@ export interface ExtractedImageTransaction {
   amount: number;
   storeName?: string | null;
   itemName?: string | null;
+  paymentMethod?: PaymentMethod | null;
   /** AI が提案したカテゴリ名（候補に無い/未分類なら null） */
   categoryName?: string | null;
 }

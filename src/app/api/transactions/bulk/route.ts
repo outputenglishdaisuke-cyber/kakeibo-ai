@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { getMonthRange } from "@/lib/utils";
+import { releaseLinks } from "@/lib/reconcile-service";
 
 const bulkDeleteSchema = z.discriminatedUnion("mode", [
   z.object({
@@ -68,13 +69,19 @@ export async function DELETE(req: NextRequest) {
     let result: { count: number };
 
     if (payload.mode === "ids") {
-      result = await prisma.transaction.deleteMany({
-        where: { id: { in: payload.ids } },
+      result = await prisma.$transaction(async (tx) => {
+        await releaseLinks(payload.ids, { rejectPair: false }, tx);
+        return tx.transaction.deleteMany({ where: { id: { in: payload.ids } } });
       });
     } else if (payload.mode === "month") {
       const { start, end } = getMonthRange(payload.month);
-      result = await prisma.transaction.deleteMany({
-        where: { date: { gte: start, lte: end } },
+      const where = { date: { gte: start, lte: end } };
+      result = await prisma.$transaction(async (tx) => {
+        const ids = (await tx.transaction.findMany({ where, select: { id: true } })).map(
+          (r) => r.id
+        );
+        await releaseLinks(ids, { rejectPair: false }, tx);
+        return tx.transaction.deleteMany({ where });
       });
     } else {
       result = await prisma.transaction.deleteMany({});

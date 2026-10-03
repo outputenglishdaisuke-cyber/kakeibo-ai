@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { ensureDefaultBudgets } from "@/lib/default-budgets";
 import { getMonthRange, getMonthKey } from "@/lib/utils";
-import { withActiveTransactions } from "@/lib/transaction-visibility";
+import { withCountedTransactions } from "@/lib/transaction-visibility";
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
 
@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
 
     const actuals = await prisma.transaction.groupBy({
       by: ["categoryId"],
-      where: withActiveTransactions({
+      where: withCountedTransactions({
         confirmed: true,
         date: { gte: start, lte: end },
         categoryId: { in: categoryIds },

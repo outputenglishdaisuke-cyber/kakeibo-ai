@@ -1,4 +1,4 @@
-import type { ParsedTransaction, Source } from "@/types";
+import type { ParsedTransaction, PaymentMethod, Source } from "@/types";
 
 /** memo に保存するレシート品目内訳 */
 export interface ReceiptItemsMemo {
@@ -27,6 +27,7 @@ export type ConfirmableTransaction = {
   storeName?: string | null;
   itemName?: string | null;
   memo?: string | null;
+  paymentMethod?: PaymentMethod | null;
 };
 
 export type ReceiptGroupPlan =
@@ -259,6 +260,7 @@ export function aggregateSameCategoryReceipts(
         storeName: plan.storeName,
         itemName: null,
         memo: buildReceiptItemsMemo(group, plan.storeName, plan.receiptGroupId),
+        paymentMethod: group[0].paymentMethod ?? null,
       });
     } else {
       for (const item of group) {

@@ -329,9 +329,15 @@ ${categoryListText}
     "itemName": "品目名またはnull",
     "description": "表示用の説明（店名 / 品目 または 店名）",
     "amount": 1500,
-    "categoryName": "食費"
+    "categoryName": "食費",
+    "paymentMethod": "cash"
   }
 ]
+
+paymentMethod（レシートの支払方法。同じレシートの品目はすべて同じ値）:
+- "cash": 「現金」「お預り」「お釣り」など現金払いの記載がある
+- "credit_card": 「クレジット」「カード」、VISA/JCB/Mastercard 等のブランド、iD・QUICPay・タッチ決済の記載がある
+- "unknown": 上記が読めない、電子マネー・QR決済、またはクレジットカード／銀行の利用明細画像
 
 制約:
 - date は YYYY-MM-DD。不明なら今日の日付ではなく、画像から読める最も確からしい日付。完全不明なら null ではなく画像内の他の手がかりから推定し、どうしても無理なら省略せず空文字 "" ではなく可能な限り埋める
@@ -401,6 +407,11 @@ ${categoryListText}
         categoryName = fuzzy ?? null;
       }
 
+      const paymentMethod =
+        row.paymentMethod === "cash" || row.paymentMethod === "credit_card"
+          ? row.paymentMethod
+          : "unknown";
+
       return {
         date,
         description,
@@ -408,6 +419,7 @@ ${categoryListText}
         storeName,
         itemName,
         categoryName,
+        paymentMethod,
       };
     })
     .filter((x): x is ExtractedImageTransaction => x !== null);

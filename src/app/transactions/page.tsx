@@ -44,6 +44,35 @@ function sourceLabel(source: Transaction["source"]) {
   return "手入力";
 }
 
+function reconcileLabel(tx: Transaction): { text: string; className: string } | null {
+  switch (tx.reconcileStatus) {
+    case "matched":
+      return { text: "カード照合済", className: "bg-emerald-50 text-emerald-700" };
+    case "cash":
+      return tx.cashSource === "auto"
+        ? { text: "現金（自動）", className: "bg-amber-50 text-amber-700" }
+        : { text: "現金", className: "bg-sky-50 text-sky-700" };
+    case "unknown":
+      return { text: "Unknown", className: "bg-gray-200 text-gray-700" };
+    case "unmatched":
+      return tx.source === "CSV"
+        ? { text: "レシート未照合", className: "bg-orange-50 text-orange-700" }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function ReconcileBadge({ tx, className }: { tx: Transaction; className?: string }) {
+  const label = reconcileLabel(tx);
+  if (!label) return null;
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs ${label.className} ${className ?? ""}`}>
+      {label.text}
+    </span>
+  );
+}
+
 function displayMonthLabel(monthKey: string) {
   const [y, m] = monthKey.split("-");
   return `${y}年${parseInt(m, 10)}月`;
@@ -724,6 +753,7 @@ function TransactionsPageInner() {
                           <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
                             {sourceLabel(tx.source)}
                           </span>
+                          <ReconcileBadge tx={tx} className="mt-1 block w-fit" />
                         </td>
                         <td className="py-3">
                           <Button
@@ -783,6 +813,7 @@ function TransactionsPageInner() {
                           <span className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-600">
                             {sourceLabel(tx.source)}
                           </span>
+                          <ReconcileBadge tx={tx} className="py-1" />
                         </div>
 
                         <div className="mt-3">

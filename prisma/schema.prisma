@@ -38,10 +38,57 @@ model Transaction {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  /** 支払方法（レシート・手入力のみ。カード明細は null） */
+  paymentMethod    PaymentMethod?
+  /** カード明細とレシートの突合状態 */
+  reconcileStatus  ReconcileStatus @default(unmatched)
+  /** 現金の根拠。confirmed=入力/OCRで判明、auto=突合できず自動で現金扱い */
+  cashSource       CashSource?
+  /** 突合結果の目視確認用の印。突合の成否には影響しない */
+  needsReview      Boolean         @default(false)
+  /** 同一レシートの品目行に共通のID（品目分割で保存した場合） */
+  receiptGroupId   String?
+  /** カード明細側: 突合したレシートの単位ID（単独行は Transaction.id、品目分割は receiptGroupId） */
+  matchedReceiptId String?
+  /** レシート側: 突合したカード明細の Transaction.id */
+  matchedCardId    String?
+  /** 現金への自動判定から除外する（カード明細の画像、手動でカード扱いに戻したもの） */
+  autoCashExempt   Boolean         @default(false)
+  /** 手動で紐付けを解除したカード明細。同じ組では再突合しない */
+  rejectedCardIds  String[]        @default([])
+  /** Unknown の削除（ソフト削除）。一覧・集計から除外 */
+  deletedAt        DateTime?
+
   @@index([date])
   @@index([categoryId])
   @@index([archived])
+  @@index([reconcileStatus])
+  @@index([matchedCardId])
+  @@index([receiptGroupId])
   @@unique([date, description, amount])
+}
+
+/**
+ * カード明細の店名とレシートの店名が同じ店かの判定結果（AI またはユーザー）。
+ * 名前は正規化済みの値で保持し、次回以降の突合と AI への判断材料に使う。
+ */
+model StoreMatchJudgement {
+  id            String            @id @default(cuid())
+  cardName      String
+  receiptName   String
+  /** 表示用の元の表記 */
+  cardSample    String
+  receiptSample String
+  verdict       StoreMatchVerdict
+  source        StoreMatchSource
+  confidence    Float?
+  /** AI が調べたカード明細の実店舗 */
+  merchant      String?
+  reason        String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@unique([cardName, receiptName])
 }
 
 model Rule {
@@ -79,4 +126,35 @@ enum Source {
   CSV
   MANUAL
   IMAGE
+}
+
+enum PaymentMethod {
+  credit_card
+  cash
+  unknown
+}
+
+/** カード明細: unmatched / matched / fallback_split、レシート: unmatched / matched / cash。unknown は返金・調整 */
+enum ReconcileStatus {
+  unmatched
+  matched
+  fallback_split
+  cash
+  unknown
+}
+
+enum CashSource {
+  confirmed
+  auto
+}
+
+enum StoreMatchVerdict {
+  same
+  different
+  undetermined
+}
+
+enum StoreMatchSource {
+  ai
+  user
 }

@@ -3,7 +3,12 @@ import { prisma } from "@/lib/prisma";
 import { classifyParsedTransactions } from "@/lib/classify-pipeline";
 import { ensureDefaultCategories } from "@/lib/default-categories";
 import { aggregateSameCategoryReceipts } from "@/lib/receipt-aggregation";
+import { initialReconcileFields } from "@/lib/reconcile";
+import { runReconciliation, type ReconcileRunResult } from "@/lib/reconcile-service";
 import { z } from "zod";
+
+// CSV 取込後の店名判定で Web 検索つきの AI を呼ぶため長めに取る
+export const maxDuration = 300;
 
 const transactionSchema = z.object({
   date: z.string().min(1),
@@ -20,6 +25,7 @@ const transactionSchema = z.object({
   storeName: z.string().nullable().optional(),
   itemName: z.string().nullable().optional(),
   memo: z.string().nullable().optional(),
+  paymentMethod: z.enum(["credit_card", "cash", "unknown"]).nullable().optional(),
 });
 
 const confirmSchema = z.object({
@@ -125,11 +131,27 @@ export async function POST(req: NextRequest) {
         categoryId: tx.categoryId,
         memo: tx.memo ?? null,
         confirmed: true,
+        receiptGroupId: tx.source === "CSV" ? null : tx.receiptGroupId ?? null,
+        ...initialReconcileFields(tx.source, tx.amount, tx.paymentMethod),
       })),
       // DB の複合一意制約と併用し、既存DB・同一リクエスト内の重複を除外する。
       skipDuplicates: true,
     });
     const skippedCount = toSave.length - created.length;
+
+    // CSV 取込完了時: 突合（AI 判定つき）→ 現金への自動判定。レシート保存時: 突合のみ。
+    let reconcile: ReconcileRunResult | { error: string } | null = null;
+    if (created.length > 0) {
+      const hasCard = created.some((tx) => tx.source === "CSV");
+      try {
+        reconcile = await runReconciliation({ useAi: hasCard, finalizeCash: hasCard });
+      } catch (err) {
+        console.error("[/api/import/confirm] reconcile failed:", err);
+        reconcile = {
+          error: err instanceof Error ? err.message : "突合に失敗しました",
+        };
+      }
+    }
 
     const withCategory = created.map((tx) => ({
       ...tx,
@@ -143,6 +165,7 @@ export async function POST(req: NextRequest) {
         inputCount,
         aggregatedCount: Math.max(0, aggregatedCount),
         transactions: withCategory,
+        reconcile,
       },
       { status: 201 }
     );
