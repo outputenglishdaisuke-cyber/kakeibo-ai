@@ -10,7 +10,8 @@
     "db:seed": "npx tsx --env-file=.env.local prisma/seed.ts",
     "db:backup-transactions": "npx tsx --env-file=.env.local scripts/backup-transactions.ts",
     "db:migrate-receipts:dry": "npx tsx --env-file=.env.local scripts/migrate-aggregate-receipts.ts --backup --allow-heuristic",
-    "db:migrate-receipts:apply": "npx tsx --env-file=.env.local scripts/migrate-aggregate-receipts.ts --backup --allow-heuristic --apply"
+    "db:migrate-receipts:apply": "npx tsx --env-file=.env.local scripts/migrate-aggregate-receipts.ts --backup --allow-heuristic --apply",
+    "db:audit-receipts": "npx tsx --env-file=.env.local scripts/audit-receipt-aggregation.ts"
   },
   "prisma": {
     "seed": "npx tsx --env-file=.env.local prisma/seed.ts"
